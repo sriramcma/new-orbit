@@ -16,6 +16,8 @@ import { useAuth } from '../context/AuthContext';
 import { MODULES } from '../data/modules';
 import { Badge } from './ui';
 import { ThemeToggle } from './ThemeToggle';
+import { PWAInstallButton } from './PWAInstallButton';
+import { OfflineIndicator } from './OfflineIndicator';
 
 export const Layout: React.FC = () => {
   const { user, signOut, isDemoUser, isSupabaseConnected } = useAuth();
@@ -75,8 +77,9 @@ export const Layout: React.FC = () => {
             </div>
           </NavLink>
 
-          {/* Right Action: Theme Toggle & Avatar Menu */}
+          {/* Right Action: Install Button, Theme Toggle & Avatar Menu */}
           <div className="relative flex items-center gap-1.5">
+            <PWAInstallButton variant="header" />
             {/* Theme Toggle Icon Button */}
             <ThemeToggle />
 
@@ -227,6 +230,11 @@ export const Layout: React.FC = () => {
                 </div>
               </div>
 
+              {/* PWA Install Banner in Drawer */}
+              <div className="px-4 pt-3 pb-1">
+                <PWAInstallButton variant="drawer" />
+              </div>
+
               {/* Module List */}
               <div className="flex-1 overflow-y-auto p-4 space-y-2">
                 {MODULES.map((mod) => {
@@ -313,6 +321,8 @@ export const Layout: React.FC = () => {
           </div>
         )}
 
+        {/* Offline connectivity indicator */}
+        <OfflineIndicator />
       </div>
     </div>
   );
