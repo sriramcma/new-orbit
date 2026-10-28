@@ -1,0 +1,8 @@
+{
+  "name": "ORBIT — Personal Life OS",
+  "description": "A clean, mobile-first personal operating system for tasks, finances, knowledge, habits, and daily life management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
