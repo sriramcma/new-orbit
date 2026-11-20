@@ -111,13 +111,29 @@ export const TasksPage: React.FC = () => {
               const newTask = payload.new as Task;
               setTasks((prev) => {
                 if (prev.some((t) => t.id === newTask.id)) return prev;
-                return [{ ...newTask, subtasks: newTask.subtasks || [] }, ...prev];
+                return [
+                  {
+                    ...newTask,
+                    subtasks: newTask.subtasks || [],
+                    repeat_rule: newTask.repeat_rule || null,
+                  },
+                  ...prev,
+                ];
               });
             } else if (payload.eventType === 'UPDATE') {
               const updated = payload.new as Task;
+              const hasSubtasks = Object.prototype.hasOwnProperty.call(updated, 'subtasks');
+              const hasRepeat = Object.prototype.hasOwnProperty.call(updated, 'repeat_rule');
               setTasks((prev) =>
                 prev.map((t) =>
-                  t.id === updated.id ? { ...updated, subtasks: updated.subtasks || [] } : t
+                  t.id === updated.id
+                    ? {
+                        ...t,
+                        ...updated,
+                        subtasks: hasSubtasks ? updated.subtasks || [] : t.subtasks || [],
+                        repeat_rule: hasRepeat ? updated.repeat_rule || null : t.repeat_rule || null,
+                      }
+                    : t
                 )
               );
             } else if (payload.eventType === 'DELETE') {
