@@ -15,6 +15,30 @@
     font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
     -webkit-tap-highlight-color: transparent;
   }
+
+  input[type="date"],
+  input[type="datetime-local"],
+  input[type="time"] {
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+}
+
+/* Hide scrollbars cleanly for horizontal pill scrollers */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Editorial serif for day calendar heading & numerals */
+.font-editorial {
+  font-family: 'Newsreader', Georgia, 'Times New Roman', serif;
+  font-variant-numeric: lining-nums tabular-nums;
 }
 
 /* Custom subtle scrollbar with smooth theme adaptation */

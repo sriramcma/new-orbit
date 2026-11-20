@@ -1,5 +1,5 @@
 import { supabase, isSupabaseConfigured } from '../supabaseClient';
-import { Task, TaskPriority, TaskStatus } from '../types/task';
+import { Subtask, Task, TaskPriority, TaskStatus } from '../types/task';
 
 const LOCAL_STORAGE_PREFIX = 'orbit_tasks_cache_';
 
@@ -9,14 +9,20 @@ CREATE TABLE IF NOT EXISTS public.tasks (
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
   description TEXT,
-  category TEXT DEFAULT 'General',
   priority TEXT CHECK (priority IN ('low', 'medium', 'high')) DEFAULT 'medium',
   status TEXT CHECK (status IN ('pending', 'done')) DEFAULT 'pending',
   due_date TEXT,
   reminder_at TIMESTAMPTZ,
+  subtasks JSONB DEFAULT '[]'::jsonb,
+  repeat_rule JSONB,
   completed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- If upgrading an existing table, add subtasks & repeat_rule columns:
+ALTER TABLE public.tasks
+  ADD COLUMN IF NOT EXISTS subtasks JSONB DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS repeat_rule JSONB;
 
 -- Enable Row Level Security (RLS)
 ALTER TABLE public.tasks ENABLE ROW LEVEL SECURITY;
@@ -29,11 +35,20 @@ CREATE POLICY "Users can manage their own tasks"
   WITH CHECK (auth.uid() = user_id);
 `;
 
+const normalizeTask = (raw: Task): Task => ({
+  ...raw,
+  subtasks: Array.isArray(raw.subtasks) ? raw.subtasks : [],
+  repeat_rule: raw.repeat_rule || null,
+});
+
 const getLocalTasks = (userId: string): Task[] => {
   if (typeof window === 'undefined') return [];
   try {
     const raw = localStorage.getItem(`${LOCAL_STORAGE_PREFIX}${userId}`);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Task[];
+      return Array.isArray(parsed) ? parsed.map(normalizeTask) : [];
+    }
   } catch (e) {
     console.error('Error reading tasks cache:', e);
   }
@@ -65,11 +80,10 @@ export const taskService = {
         .order('created_at', { ascending: false });
 
       if (error) {
-        // Table may not be created yet in Supabase
         return { tasks: local, fromDatabase: false, error: error.message };
       }
 
-      const tasks = (data as Task[]) || [];
+      const tasks = ((data as Task[]) || []).map(normalizeTask);
       saveLocalTasks(userId, tasks);
       return { tasks, fromDatabase: true };
     } catch (err: unknown) {
@@ -87,11 +101,12 @@ export const taskService = {
       user_id: userId,
       title: title.trim(),
       description: extra.description || null,
-      category: extra.category || 'General',
       priority: extra.priority || 'medium',
       status: 'pending',
       due_date: extra.due_date || null,
       reminder_at: extra.reminder_at || null,
+      subtasks: Array.isArray(extra.subtasks) ? extra.subtasks : [],
+      repeat_rule: extra.repeat_rule || null,
       completed_at: null,
       created_at: new Date().toISOString(),
     };
@@ -117,10 +132,10 @@ export const taskService = {
       }
 
       if (data) {
-        // Replace with server copy
-        const finalTasks = updated.map((t) => (t.id === newTask.id ? (data as Task) : t));
+        const normalized = normalizeTask(data as Task);
+        const finalTasks = updated.map((t) => (t.id === newTask.id ? normalized : t));
         saveLocalTasks(userId, finalTasks);
-        return { task: data as Task, fromDatabase: true };
+        return { task: normalized, fromDatabase: true };
       }
 
       return { task: newTask, fromDatabase: true };
@@ -140,10 +155,10 @@ export const taskService = {
       throw new Error('Task not found');
     }
 
-    const updatedTask: Task = {
+    const updatedTask: Task = normalizeTask({
       ...existing,
       ...updates,
-    };
+    });
 
     const nextList = current.map((t) => (t.id === taskId ? updatedTask : t));
     saveLocalTasks(userId, nextList);
@@ -165,10 +180,18 @@ export const taskService = {
         return { task: updatedTask, fromDatabase: false, error: error.message };
       }
 
-      return { task: (data as Task) || updatedTask, fromDatabase: true };
+      return { task: data ? normalizeTask(data as Task) : updatedTask, fromDatabase: true };
     } catch (err: unknown) {
       return { task: updatedTask, fromDatabase: false, error: err instanceof Error ? err.message : 'Update failed' };
     }
+  },
+
+  async updateSubtasks(
+    userId: string,
+    taskId: string,
+    subtasks: Subtask[]
+  ): Promise<{ task: Task; fromDatabase: boolean; error?: string }> {
+    return this.updateTask(userId, taskId, { subtasks });
   },
 
   async toggleTaskStatus(

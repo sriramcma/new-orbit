@@ -403,14 +403,14 @@ export const Dashboard: React.FC = () => {
                   <div
                     key={t.id}
                     onClick={() => handleToggleTask(t.id)}
-                    className="flex items-center gap-2.5 p-2.5 rounded-xl bg-gray-50 dark:bg-slate-900/60 hover:bg-indigo-50/50 dark:hover:bg-slate-800 border border-[#e5e7eb] dark:border-[#334155] cursor-pointer transition-colors"
+                    className="flex items-center gap-2.5 p-2.5 min-w-0 rounded-xl bg-gray-50 dark:bg-slate-900/60 hover:bg-indigo-50/50 dark:hover:bg-slate-800 border border-[#e5e7eb] dark:border-[#334155] cursor-pointer transition-colors"
                   >
                     <Circle className="w-4 h-4 text-gray-400 hover:text-[#6366f1] shrink-0" />
-                    <span className="text-xs font-semibold text-[#111827] dark:text-[#f1f5f9] truncate flex-1">
+                    <span className="text-xs font-semibold text-[#111827] dark:text-[#f1f5f9] truncate flex-1 min-w-0">
                       {t.title}
                     </span>
                     {t.priority === 'high' && (
-                      <span className="text-[10px] font-semibold text-rose-600 px-1.5 py-0.2 rounded bg-rose-50 dark:bg-rose-950/60">
+                      <span className="shrink-0 text-[10px] font-semibold text-rose-600 px-1.5 py-0.5 rounded bg-rose-50 dark:bg-rose-950/60">
                         High
                       </span>
                     )}
