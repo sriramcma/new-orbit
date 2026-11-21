@@ -18,14 +18,20 @@ import {
   Repeat,
 } from 'lucide-react';
 import { Subtask, Task, TaskPriority, TaskRepeatRule } from '../../types/task';
-import { formatDueBadge, isTaskOverdue } from '../../utils/taskDate';
-import { formatRepeatLabel } from '../../utils/taskRepeat';
+import {
+  formatDueBadge,
+  getTaskDateKey,
+  isTaskOverdue,
+  toDateTimeLocalInput,
+} from '../../utils/taskDate';
+import { formatRepeatLabel, syncRuleWithAnchorDate } from '../../utils/taskRepeat';
 import { RepeatPicker } from './RepeatPicker';
 import { Button } from '../ui';
 
 interface TaskCardProps {
   task: Task;
   isExpanded: boolean;
+  isProjected?: boolean;
   showDateBadge?: boolean;
   onToggleExpand: () => void;
   onToggleStatus: (taskId: string) => void;
@@ -39,6 +45,7 @@ interface TaskCardProps {
 export const TaskCard: React.FC<TaskCardProps> = ({
   task,
   isExpanded,
+  isProjected = false,
   showDateBadge = false,
   onToggleExpand,
   onToggleStatus,
@@ -49,7 +56,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   onMoveToToday,
 }) => {
   const isDone = task.status === 'done';
-  const isOverdue = isTaskOverdue(task.due_date, task.status);
+  const isOverdue = !isProjected && isTaskOverdue(task.due_date, task.status);
   const dueInfo = formatDueBadge(task.due_date, task.status);
   const repeatLabel = formatRepeatLabel(task.repeat_rule);
 
@@ -70,22 +77,36 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   const [editDescription, setEditDescription] = useState(task.description || '');
   const [editPriority, setEditPriority] = useState<TaskPriority>(task.priority || 'medium');
   const [editDueDate, setEditDueDate] = useState(task.due_date || '');
-  const [editReminder, setEditReminder] = useState(
-    task.reminder_at ? task.reminder_at.slice(0, 16) : ''
-  );
+  const [editReminder, setEditReminder] = useState(toDateTimeLocalInput(task.reminder_at));
   const [editRepeatRule, setEditRepeatRule] = useState<TaskRepeatRule | null>(
     task.repeat_rule || null
   );
 
-  // Keep edit fields synced when task changes externally or card expands
+  // Only reset form fields when card transitions collapsed -> expanded or task ID changes,
+  // so instant-save subtask toggles or repeat changes NEVER wipe unsaved Title/Notes/Date edits.
+  const wasExpandedRef = useRef(false);
+  const prevTaskIdRef = useRef(task.id);
+
   useEffect(() => {
-    setEditTitle(task.title);
-    setEditDescription(task.description || '');
-    setEditPriority(task.priority || 'medium');
-    setEditDueDate(task.due_date || '');
-    setEditReminder(task.reminder_at ? task.reminder_at.slice(0, 16) : '');
+    const opening = isExpanded && !wasExpandedRef.current;
+    const switchedTask = prevTaskIdRef.current !== task.id;
+    if (opening || switchedTask) {
+      setEditTitle(task.title);
+      setEditDescription(task.description || '');
+      setEditPriority(task.priority || 'medium');
+      setEditDueDate(task.due_date || '');
+      setEditReminder(toDateTimeLocalInput(task.reminder_at));
+      setEditRepeatRule(task.repeat_rule || null);
+      setNewSubtaskTitle('');
+    }
+    wasExpandedRef.current = isExpanded;
+    prevTaskIdRef.current = task.id;
+  }, [isExpanded, task]);
+
+  // Keep repeat pill synced if updated externally without wiping other form inputs
+  useEffect(() => {
     setEditRepeatRule(task.repeat_rule || null);
-  }, [task, isExpanded]);
+  }, [task.repeat_rule]);
 
   // Mobile swipe gestures
   const touchStartX = useRef<number | null>(null);
@@ -147,19 +168,30 @@ export const TaskCard: React.FC<TaskCardProps> = ({
     onUpdateSubtasks(task.id, next);
   };
 
+  const handleDueDateChange = (nextDate: string) => {
+    setEditDueDate(nextDate);
+    if (nextDate && editRepeatRule?.preset === 'weekly') {
+      const synced = syncRuleWithAnchorDate(editRepeatRule, nextDate);
+      setEditRepeatRule(synced);
+    }
+  };
+
   const handleSaveDetails = (e: React.FormEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    const syncedRule = syncRuleWithAnchorDate(editRepeatRule, editDueDate || undefined);
     onUpdate(task.id, {
       title: editTitle.trim() || task.title,
       description: editDescription.trim() || null,
       priority: editPriority,
-      due_date: editDueDate || null,
+      ...(isProjected ? {} : { due_date: editDueDate || null }),
       reminder_at: editReminder ? new Date(editReminder).toISOString() : null,
-      repeat_rule: editRepeatRule,
+      repeat_rule: syncedRule,
     });
     onToggleExpand();
   };
+
+  const anchorForRepeat = editDueDate || getTaskDateKey(task);
 
   return (
     <div
@@ -174,6 +206,8 @@ export const TaskCard: React.FC<TaskCardProps> = ({
       } ${
         isOverdue && !isDone
           ? 'border-l-4 border-l-rose-500 border-r-[#e5e7eb] border-y-[#e5e7eb] dark:border-r-[#334155] dark:border-y-[#334155]'
+          : isProjected
+          ? 'border-dashed border-violet-300/90 dark:border-violet-700/70'
           : 'border-[#e5e7eb] dark:border-[#334155]'
       } ${isDone ? 'opacity-70 dark:opacity-60 bg-gray-50/50 dark:bg-slate-800/40' : ''}`}
     >
@@ -251,7 +285,9 @@ export const TaskCard: React.FC<TaskCardProps> = ({
             {repeatLabel && (
               <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-md border max-w-full bg-violet-50 text-violet-700 dark:bg-violet-950/60 dark:text-violet-300 border-violet-200/70 dark:border-violet-900/50">
                 <Repeat className="w-3 h-3 shrink-0" />
-                <span className="truncate">{repeatLabel}</span>
+                <span className="truncate">
+                  {isProjected ? `${repeatLabel} · Upcoming` : repeatLabel}
+                </span>
               </span>
             )}
 
@@ -273,7 +309,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
           </div>
         </div>
 
-        {/* RIGHT SIDE: EXPAND CHEVRON & 3-DOTS MENU TRIGGER */}
+        {/* RIGHT SIDE: 3-DOTS MENU TRIGGER */}
         <div className="relative shrink-0 flex items-center gap-0.5">
           <button
             type="button"
@@ -357,7 +393,9 @@ export const TaskCard: React.FC<TaskCardProps> = ({
                   className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg text-left cursor-pointer"
                 >
                   <Trash2 className="w-3.5 h-3.5 shrink-0" />
-                  <span className="truncate">Delete task</span>
+                  <span className="truncate">
+                    {isProjected ? 'Stop repeat' : 'Delete task'}
+                  </span>
                 </button>
               </div>
             </>
@@ -365,7 +403,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
         </div>
       </div>
 
-      {/* CONFIRM DELETE DIALOG (inline) */}
+      {/* CONFIRM DELETE / STOP REPEAT DIALOG (inline) */}
       {showDeleteConfirm && (
         <div
           className={`p-3 bg-rose-50/90 dark:bg-rose-950/60 border-t border-rose-200 dark:border-rose-900/60 flex flex-wrap items-center justify-between gap-2 text-xs animate-in fade-in duration-150 ${
@@ -373,7 +411,8 @@ export const TaskCard: React.FC<TaskCardProps> = ({
           }`}
         >
           <span className="flex items-center gap-1.5 text-rose-700 dark:text-rose-300 font-medium min-w-0">
-            <AlertTriangle className="w-4 h-4 shrink-0" /> Delete this task?
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            {isProjected ? 'Stop repeating this task?' : 'Delete this task?'}
           </span>
           <div className="flex items-center gap-1.5 shrink-0 ml-auto">
             <Button
@@ -393,7 +432,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
               }}
               className="text-xs h-7 px-2.5"
             >
-              Delete
+              {isProjected ? 'Stop Repeat' : 'Delete'}
             </Button>
           </div>
         </div>
@@ -405,6 +444,13 @@ export const TaskCard: React.FC<TaskCardProps> = ({
           onClick={(e) => e.stopPropagation()}
           className="p-3.5 sm:p-4 border-t border-[#e5e7eb] dark:border-[#334155] bg-gray-50/70 dark:bg-slate-900/40 rounded-b-xl space-y-4 text-xs animate-in fade-in duration-200 overflow-x-hidden"
         >
+          {isProjected && (
+            <div className="px-2.5 py-1.5 rounded-lg bg-violet-50 dark:bg-violet-950/40 border border-violet-200/70 dark:border-violet-800/50 text-[11px] text-violet-700 dark:text-violet-300 flex items-center gap-1.5">
+              <Repeat className="w-3.5 h-3.5 shrink-0" />
+              <span>Upcoming repeat occurrence · Edits below update the repeating schedule.</span>
+            </div>
+          )}
+
           {/* SUBTASKS SECTION (Instant-save checklist) */}
           <div className="space-y-2.5 min-w-0">
             <div className="flex items-center justify-between gap-2">
@@ -566,28 +612,30 @@ export const TaskCard: React.FC<TaskCardProps> = ({
 
             {/* Due date & Reminder (Full-width rows) */}
             <div className="grid grid-cols-1 gap-3 min-w-0">
-              <div className="space-y-1 min-w-0">
-                <div className="flex items-center justify-between gap-2">
-                  <label className="font-semibold text-[#111827] dark:text-[#f1f5f9] flex items-center gap-1">
-                    <Calendar className="w-3 h-3 text-[#6366f1] dark:text-[#818cf8] shrink-0" /> Date
-                  </label>
-                  {editDueDate && (
-                    <button
-                      type="button"
-                      onClick={() => setEditDueDate('')}
-                      className="text-[10px] text-[#6b7280] hover:text-rose-500 cursor-pointer"
-                    >
-                      Clear
-                    </button>
-                  )}
+              {!isProjected && (
+                <div className="space-y-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="font-semibold text-[#111827] dark:text-[#f1f5f9] flex items-center gap-1">
+                      <Calendar className="w-3 h-3 text-[#6366f1] dark:text-[#818cf8] shrink-0" /> Date
+                    </label>
+                    {editDueDate && (
+                      <button
+                        type="button"
+                        onClick={() => handleDueDateChange('')}
+                        className="text-[10px] text-[#6b7280] hover:text-rose-500 cursor-pointer"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    type="date"
+                    value={editDueDate}
+                    onChange={(e) => handleDueDateChange(e.target.value)}
+                    className="block w-full min-w-0 max-w-full rounded-xl border border-[#e5e7eb] dark:border-[#334155] bg-white dark:bg-[#1e293b] px-3 py-2 text-xs text-[#111827] dark:text-[#f1f5f9] focus:outline-none focus:border-[#6366f1] dark:focus:border-[#818cf8]"
+                  />
                 </div>
-                <input
-                  type="date"
-                  value={editDueDate}
-                  onChange={(e) => setEditDueDate(e.target.value)}
-                  className="block w-full min-w-0 max-w-full rounded-xl border border-[#e5e7eb] dark:border-[#334155] bg-white dark:bg-[#1e293b] px-3 py-2 text-xs text-[#111827] dark:text-[#f1f5f9] focus:outline-none focus:border-[#6366f1] dark:focus:border-[#818cf8]"
-                />
-              </div>
+              )}
 
               <div className="space-y-1 min-w-0">
                 <div className="flex items-center justify-between gap-2">
@@ -615,7 +663,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
               {/* Repeat Picker (Instant-save) */}
               <RepeatPicker
                 value={editRepeatRule}
-                anchorDate={editDueDate || undefined}
+                anchorDate={anchorForRepeat}
                 onChange={(nextRule) => {
                   setEditRepeatRule(nextRule);
                   onUpdate(task.id, { repeat_rule: nextRule });
@@ -632,7 +680,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
                 onClick={() => setShowDeleteConfirm(true)}
                 className="text-xs h-8 px-2.5 shrink-0"
               >
-                <Trash2 className="w-3.5 h-3.5" /> Delete
+                <Trash2 className="w-3.5 h-3.5" /> {isProjected ? 'Stop Repeat' : 'Delete'}
               </Button>
 
               <div className="flex items-center gap-2 ml-auto shrink-0">

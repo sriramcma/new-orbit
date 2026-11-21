@@ -14,12 +14,13 @@ export interface DayTaskDotInfo {
   pending: number;
   done: number;
   hasOverdue: boolean;
+  hasRepeat?: boolean;
 }
 
 interface DayCalendarStripProps {
   selectedDate: string; // YYYY-MM-DD
   onSelectDate: (dateStr: string) => void;
-  dayCountsMap: Record<string, DayTaskDotInfo>;
+  getDayDotInfo: (dateStr: string) => DayTaskDotInfo | undefined;
 }
 
 const WEEKDAY_HEADERS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
@@ -27,7 +28,7 @@ const WEEKDAY_HEADERS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 export const DayCalendarStrip: React.FC<DayCalendarStripProps> = ({
   selectedDate,
   onSelectDate,
-  dayCountsMap,
+  getDayDotInfo,
 }) => {
   const todayStr = getTodayString();
   const [isMonthOpen, setIsMonthOpen] = useState(false);
@@ -163,7 +164,7 @@ export const DayCalendarStrip: React.FC<DayCalendarStripProps> = ({
         {weekDays.map((day) => {
           const isSelected = day.dateStr === selectedDate;
           const isToday = day.dateStr === todayStr;
-          const info = dayCountsMap[day.dateStr];
+          const info = getDayDotInfo(day.dateStr);
           const hasPending = (info?.pending || 0) > 0;
           const hasDoneOnly = !hasPending && (info?.done || 0) > 0;
           const hasOverdue = info?.hasOverdue;
@@ -212,6 +213,8 @@ export const DayCalendarStrip: React.FC<DayCalendarStripProps> = ({
                     className={`w-1.5 h-1.5 rounded-full ${
                       hasOverdue
                         ? 'bg-rose-500'
+                        : info?.hasRepeat && info.pending > 0
+                        ? 'bg-violet-500 dark:bg-[#a78bfa]'
                         : isSelected
                         ? 'bg-[#6366f1] dark:bg-[#a78bfa]'
                         : 'bg-[#6366f1]/65 dark:bg-[#a78bfa]/70'
@@ -266,7 +269,7 @@ export const DayCalendarStrip: React.FC<DayCalendarStripProps> = ({
             {monthGridDays.map((cell) => {
               const isSelected = cell.dateStr === selectedDate;
               const isToday = cell.dateStr === todayStr;
-              const info = dayCountsMap[cell.dateStr];
+              const info = getDayDotInfo(cell.dateStr);
               const hasPending = (info?.pending || 0) > 0;
               const hasDoneOnly = !hasPending && (info?.done || 0) > 0;
 
@@ -294,6 +297,8 @@ export const DayCalendarStrip: React.FC<DayCalendarStripProps> = ({
                             ? 'bg-white dark:bg-slate-950'
                             : info?.hasOverdue
                             ? 'bg-rose-500'
+                            : info?.hasRepeat
+                            ? 'bg-violet-500 dark:bg-[#a78bfa]'
                             : 'bg-[#6366f1] dark:bg-[#a78bfa]'
                         }`}
                       />

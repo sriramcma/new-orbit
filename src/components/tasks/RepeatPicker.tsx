@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Repeat, X, Check, ChevronDown } from 'lucide-react';
 import { RepeatPreset, RepeatUnit, TaskRepeatRule, WeekdayIndex } from '../../types/task';
 import {
@@ -15,11 +16,11 @@ interface RepeatPickerProps {
   onChange: (rule: TaskRepeatRule | null) => void;
 }
 
-const UNIT_OPTIONS: { value: RepeatUnit; label: string }[] = [
-  { value: 'days', label: 'days' },
-  { value: 'weeks', label: 'weeks' },
-  { value: 'months', label: 'months' },
-  { value: 'years', label: 'years' },
+const UNIT_OPTIONS: { value: RepeatUnit; singular: string; plural: string }[] = [
+  { value: 'days', singular: 'day', plural: 'days' },
+  { value: 'weeks', singular: 'week', plural: 'weeks' },
+  { value: 'months', singular: 'month', plural: 'months' },
+  { value: 'years', singular: 'year', plural: 'years' },
 ];
 
 const PresetGlyph: React.FC<{ preset: RepeatPreset }> = ({ preset }) => {
@@ -126,6 +127,26 @@ export const RepeatPicker: React.FC<RepeatPickerProps> = ({
   const [customWeekdays, setCustomWeekdays] = useState<WeekdayIndex[]>([1]);
 
   const activeLabel = formatRepeatLabel(value);
+  const parsedInterval = Math.max(1, parseInt(customInterval, 10) || 1);
+
+  // Close overlays on Escape key
+  useEffect(() => {
+    if (!showPresetMenu && !showCustomModal) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        if (showUnitMenu) {
+          setShowUnitMenu(false);
+        } else if (showCustomModal) {
+          setShowCustomModal(false);
+        } else if (showPresetMenu) {
+          setShowPresetMenu(false);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showPresetMenu, showCustomModal, showUnitMenu]);
 
   const getDefaultWeekday = (): WeekdayIndex => {
     const d = anchorDate ? parseDateOnly(anchorDate) : new Date();
@@ -140,7 +161,7 @@ export const RepeatPicker: React.FC<RepeatPickerProps> = ({
         setCustomUnit(value.unit || 'weeks');
         setCustomWeekdays(
           value.weekdays && value.weekdays.length > 0
-            ? value.weekdays
+            ? [...value.weekdays]
             : [getDefaultWeekday()]
         );
       } else {
@@ -195,6 +216,232 @@ export const RepeatPicker: React.FC<RepeatPickerProps> = ({
     { key: 'custom', label: 'Customised' },
   ];
 
+  const getUnitDisplayLabel = (unit: RepeatUnit) => {
+    const found = UNIT_OPTIONS.find((u) => u.value === unit);
+    if (!found) return unit;
+    return parsedInterval === 1 ? found.singular : found.plural;
+  };
+
+  const presetModal =
+    showPresetMenu && typeof document !== 'undefined'
+      ? createPortal(
+          <div
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowPresetMenu(false);
+            }}
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/55 backdrop-blur-xs p-4 animate-in fade-in duration-150"
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-[300px] rounded-2xl bg-white dark:bg-[#1e293b] border border-[#e5e7eb] dark:border-[#334155] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150"
+            >
+              <div className="px-4 py-3 border-b border-[#e5e7eb] dark:border-[#334155] flex items-center justify-between">
+                <span className="text-xs font-bold text-[#111827] dark:text-[#f1f5f9] flex items-center gap-1.5">
+                  <Repeat className="w-3.5 h-3.5 text-[#6366f1] dark:text-[#a78bfa]" />
+                  Repeat Task
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowPresetMenu(false)}
+                  className="p-1 rounded-lg text-[#6b7280] hover:text-[#111827] dark:hover:text-white cursor-pointer"
+                  aria-label="Close repeat menu"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              <div className="p-1.5 space-y-0.5">
+                {presetItems.map((item) => {
+                  const isSelected = value?.preset === item.key;
+                  return (
+                    <button
+                      key={item.key}
+                      type="button"
+                      onClick={() => handleSelectPreset(item.key)}
+                      className={`w-full flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl text-sm transition-colors cursor-pointer ${
+                        isSelected
+                          ? 'bg-indigo-50 text-[#6366f1] dark:bg-indigo-950/60 dark:text-[#a78bfa] font-semibold'
+                          : 'text-[#111827] dark:text-[#f1f5f9] hover:bg-gray-100 dark:hover:bg-slate-800/80'
+                      }`}
+                    >
+                      <span className="flex items-center gap-3 min-w-0">
+                        <PresetGlyph preset={item.key} />
+                        <span className="truncate">{item.label}</span>
+                      </span>
+                      {isSelected && <Check className="w-4 h-4 shrink-0" />}
+                    </button>
+                  );
+                })}
+
+                {value && (
+                  <>
+                    <div className="border-t border-[#e5e7eb] dark:border-[#334155] my-1" />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onChange(null);
+                        setShowPresetMenu(false);
+                      }}
+                      className="w-full flex items-center gap-3 px-3.5 py-2 rounded-xl text-xs font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors cursor-pointer"
+                    >
+                      <X className="w-4 h-4 shrink-0" />
+                      <span>Don&apos;t repeat</span>
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>,
+          document.body
+        )
+      : null;
+
+  const customModal =
+    showCustomModal && typeof document !== 'undefined'
+      ? createPortal(
+          <div
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowCustomModal(false);
+              setShowUnitMenu(false);
+            }}
+            className="fixed inset-0 z-[110] flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-150"
+          >
+            <div
+              onClick={(e) => {
+                e.stopPropagation();
+                if (showUnitMenu) setShowUnitMenu(false);
+              }}
+              className="w-full max-w-[340px] rounded-2xl bg-white dark:bg-[#1e293b] border border-[#e5e7eb] dark:border-[#334155] shadow-2xl p-5 space-y-5 animate-in zoom-in-95 duration-150"
+            >
+              <h3 className="text-lg font-bold text-[#111827] dark:text-[#f1f5f9]">
+                Repeat every ...
+              </h3>
+
+              {/* Interval + Unit Row */}
+              <div className="flex items-center gap-4 min-w-0">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={customInterval}
+                  onChange={(e) => {
+                    const digitsOnly = e.target.value.replace(/[^\d]/g, '').slice(0, 3);
+                    setCustomInterval(digitsOnly);
+                  }}
+                  onBlur={() => {
+                    const n = parseInt(customInterval, 10);
+                    setCustomInterval(String(Number.isNaN(n) || n < 1 ? 1 : Math.min(999, n)));
+                  }}
+                  className="w-16 text-center text-base font-semibold bg-transparent border-b-2 border-[#6366f1] dark:border-[#a78bfa] py-1.5 text-[#111827] dark:text-[#f1f5f9] focus:outline-none shrink-0"
+                  aria-label="Repeat interval"
+                />
+
+                {/* Custom Unit Dropdown (days / weeks / months / years) */}
+                <div className="relative flex-1 min-w-0">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowUnitMenu((prev) => !prev);
+                    }}
+                    className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl border border-[#e5e7eb] dark:border-[#334155] bg-gray-50 dark:bg-slate-800/80 text-sm font-medium text-[#111827] dark:text-[#f1f5f9] cursor-pointer"
+                  >
+                    <span>{getUnitDisplayLabel(customUnit)}</span>
+                    <ChevronDown
+                      className={`w-4 h-4 text-[#6b7280] dark:text-[#94a3b8] transition-transform ${
+                        showUnitMenu ? 'rotate-180' : ''
+                      }`}
+                    />
+                  </button>
+
+                  {showUnitMenu && (
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      className="absolute left-0 right-0 top-full mt-1.5 z-20 rounded-xl bg-white dark:bg-[#0f172a] border border-[#e5e7eb] dark:border-[#334155] shadow-xl p-1 space-y-0.5 animate-in fade-in zoom-in-95 duration-100"
+                    >
+                      {UNIT_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() => {
+                            setCustomUnit(opt.value);
+                            setShowUnitMenu(false);
+                          }}
+                          className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm text-left transition-colors cursor-pointer ${
+                            customUnit === opt.value
+                              ? 'bg-indigo-50 text-[#6366f1] dark:bg-indigo-950/60 dark:text-[#a78bfa] font-semibold'
+                              : 'text-[#111827] dark:text-[#f1f5f9] hover:bg-gray-100 dark:hover:bg-slate-800'
+                          }`}
+                        >
+                          <span>{parsedInterval === 1 ? opt.singular : opt.plural}</span>
+                          {customUnit === opt.value && <Check className="w-3.5 h-3.5" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Circular Weekday Selector (Shown when unit === 'weeks') */}
+              {customUnit === 'weeks' && (
+                <div className="space-y-2">
+                  <p className="text-[11px] font-medium text-[#6b7280] dark:text-[#94a3b8]">
+                    Repeat on
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {WEEKDAY_OPTIONS.map((wd) => {
+                      const active = customWeekdays.includes(wd.index);
+                      return (
+                        <button
+                          key={wd.index}
+                          type="button"
+                          onClick={() => toggleWeekday(wd.index)}
+                          className={`w-10 h-10 rounded-full text-[11px] font-semibold flex items-center justify-center border transition-all cursor-pointer ${
+                            active
+                              ? 'bg-[#6366f1] border-[#6366f1] text-white dark:bg-[#a78bfa] dark:border-[#a78bfa] dark:text-slate-950 shadow-xs'
+                              : 'bg-transparent border-[#d1d5db] dark:border-slate-600 text-[#6b7280] dark:text-slate-300 hover:border-[#6366f1] dark:hover:border-[#a78bfa]'
+                          }`}
+                          aria-pressed={active}
+                        >
+                          {wd.short}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Footer Actions */}
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#e5e7eb] dark:border-[#334155]">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setShowCustomModal(false);
+                    setShowUnitMenu(false);
+                  }}
+                  className="text-xs"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={handleSaveCustom}
+                  className="text-xs px-4 font-semibold"
+                >
+                  Done
+                </Button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )
+      : null;
+
   return (
     <div className="space-y-1 min-w-0">
       <label className="font-semibold text-[#111827] dark:text-[#f1f5f9] flex items-center gap-1">
@@ -232,213 +479,8 @@ export const RepeatPicker: React.FC<RepeatPickerProps> = ({
         )}
       </div>
 
-      {/* PRESET SELECTION OVERLAY (Matches Screenshot 1) */}
-      {showPresetMenu && (
-        <div
-          onClick={() => setShowPresetMenu(false)}
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/55 backdrop-blur-xs p-4 animate-in fade-in duration-150"
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-[300px] rounded-2xl bg-white dark:bg-[#1e293b] border border-[#e5e7eb] dark:border-[#334155] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150"
-          >
-            <div className="px-4 py-3 border-b border-[#e5e7eb] dark:border-[#334155] flex items-center justify-between">
-              <span className="text-xs font-bold text-[#111827] dark:text-[#f1f5f9] flex items-center gap-1.5">
-                <Repeat className="w-3.5 h-3.5 text-[#6366f1] dark:text-[#a78bfa]" />
-                Repeat Task
-              </span>
-              <button
-                type="button"
-                onClick={() => setShowPresetMenu(false)}
-                className="p-1 rounded-lg text-[#6b7280] hover:text-[#111827] dark:hover:text-white cursor-pointer"
-                aria-label="Close repeat menu"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-
-            <div className="p-1.5 space-y-0.5">
-              {presetItems.map((item) => {
-                const isSelected = value?.preset === item.key;
-                return (
-                  <button
-                    key={item.key}
-                    type="button"
-                    onClick={() => handleSelectPreset(item.key)}
-                    className={`w-full flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl text-sm transition-colors cursor-pointer ${
-                      isSelected
-                        ? 'bg-indigo-50 text-[#6366f1] dark:bg-indigo-950/60 dark:text-[#a78bfa] font-semibold'
-                        : 'text-[#111827] dark:text-[#f1f5f9] hover:bg-gray-100 dark:hover:bg-slate-800/80'
-                    }`}
-                  >
-                    <span className="flex items-center gap-3 min-w-0">
-                      <PresetGlyph preset={item.key} />
-                      <span className="truncate">{item.label}</span>
-                    </span>
-                    {isSelected && <Check className="w-4 h-4 shrink-0" />}
-                  </button>
-                );
-              })}
-
-              {value && (
-                <>
-                  <div className="border-t border-[#e5e7eb] dark:border-[#334155] my-1" />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onChange(null);
-                      setShowPresetMenu(false);
-                    }}
-                    className="w-full flex items-center gap-3 px-3.5 py-2 rounded-xl text-xs font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors cursor-pointer"
-                  >
-                    <X className="w-4 h-4 shrink-0" />
-                    <span>Don&apos;t repeat</span>
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* CUSTOMISED "Repeat every ..." DIALOG (Matches Screenshot 2) */}
-      {showCustomModal && (
-        <div
-          onClick={() => {
-            setShowCustomModal(false);
-            setShowUnitMenu(false);
-          }}
-          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-150"
-        >
-          <div
-            onClick={(e) => {
-              e.stopPropagation();
-              if (showUnitMenu) setShowUnitMenu(false);
-            }}
-            className="w-full max-w-[340px] rounded-2xl bg-white dark:bg-[#1e293b] border border-[#e5e7eb] dark:border-[#334155] shadow-2xl p-5 space-y-5 animate-in zoom-in-95 duration-150"
-          >
-            <h3 className="text-lg font-bold text-[#111827] dark:text-[#f1f5f9]">
-              Repeat every ...
-            </h3>
-
-            {/* Interval + Unit Row */}
-            <div className="flex items-center gap-4 min-w-0">
-              <input
-                type="number"
-                inputMode="numeric"
-                min={1}
-                max={999}
-                value={customInterval}
-                onChange={(e) => setCustomInterval(e.target.value)}
-                onBlur={() => {
-                  const n = parseInt(customInterval, 10);
-                  setCustomInterval(String(Number.isNaN(n) || n < 1 ? 1 : Math.min(999, n)));
-                }}
-                className="w-16 text-center text-base font-semibold bg-transparent border-b-2 border-[#6366f1] dark:border-[#a78bfa] py-1.5 text-[#111827] dark:text-[#f1f5f9] focus:outline-none shrink-0"
-                aria-label="Repeat interval"
-              />
-
-              {/* Custom Unit Dropdown (days / weeks / months / years) */}
-              <div className="relative flex-1 min-w-0">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowUnitMenu((prev) => !prev);
-                  }}
-                  className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl border border-[#e5e7eb] dark:border-[#334155] bg-gray-50 dark:bg-slate-800/80 text-sm font-medium text-[#111827] dark:text-[#f1f5f9] cursor-pointer"
-                >
-                  <span>{customUnit}</span>
-                  <ChevronDown
-                    className={`w-4 h-4 text-[#6b7280] dark:text-[#94a3b8] transition-transform ${
-                      showUnitMenu ? 'rotate-180' : ''
-                    }`}
-                  />
-                </button>
-
-                {showUnitMenu && (
-                  <div
-                    onClick={(e) => e.stopPropagation()}
-                    className="absolute left-0 right-0 top-full mt-1.5 z-20 rounded-xl bg-white dark:bg-[#0f172a] border border-[#e5e7eb] dark:border-[#334155] shadow-xl p-1 space-y-0.5 animate-in fade-in zoom-in-95 duration-100"
-                  >
-                    {UNIT_OPTIONS.map((opt) => (
-                      <button
-                        key={opt.value}
-                        type="button"
-                        onClick={() => {
-                          setCustomUnit(opt.value);
-                          setShowUnitMenu(false);
-                        }}
-                        className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm text-left transition-colors cursor-pointer ${
-                          customUnit === opt.value
-                            ? 'bg-indigo-50 text-[#6366f1] dark:bg-indigo-950/60 dark:text-[#a78bfa] font-semibold'
-                            : 'text-[#111827] dark:text-[#f1f5f9] hover:bg-gray-100 dark:hover:bg-slate-800'
-                        }`}
-                      >
-                        <span>{opt.label}</span>
-                        {customUnit === opt.value && <Check className="w-3.5 h-3.5" />}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Circular Weekday Selector (Shown when unit === 'weeks', matches Screenshot 2) */}
-            {customUnit === 'weeks' && (
-              <div className="space-y-2">
-                <p className="text-[11px] font-medium text-[#6b7280] dark:text-[#94a3b8]">
-                  Repeat on
-                </p>
-                <div className="flex flex-wrap items-center gap-2">
-                  {WEEKDAY_OPTIONS.map((wd) => {
-                    const active = customWeekdays.includes(wd.index);
-                    return (
-                      <button
-                        key={wd.index}
-                        type="button"
-                        onClick={() => toggleWeekday(wd.index)}
-                        className={`w-10 h-10 rounded-full text-[11px] font-semibold flex items-center justify-center border transition-all cursor-pointer ${
-                          active
-                            ? 'bg-[#6366f1] border-[#6366f1] text-white dark:bg-[#a78bfa] dark:border-[#a78bfa] dark:text-slate-950 shadow-xs'
-                            : 'bg-transparent border-[#d1d5db] dark:border-slate-600 text-[#6b7280] dark:text-slate-300 hover:border-[#6366f1] dark:hover:border-[#a78bfa]'
-                        }`}
-                        aria-pressed={active}
-                      >
-                        {wd.short}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* Footer Actions */}
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#e5e7eb] dark:border-[#334155]">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setShowCustomModal(false);
-                  setShowUnitMenu(false);
-                }}
-                className="text-xs"
-              >
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                onClick={handleSaveCustom}
-                className="text-xs px-4 font-semibold"
-              >
-                Done
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+      {presetModal}
+      {customModal}
     </div>
   );
 };

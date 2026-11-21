@@ -12,8 +12,39 @@ export function getTodayString(): string {
 }
 
 export function parseDateOnly(dateStr: string): Date {
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  }
   const [y, m, d] = dateStr.split('-').map(Number);
   return new Date(y, m - 1, d);
+}
+
+/**
+ * Computes exact whole calendar day difference (toDateStr - fromDateStr) using UTC midnight,
+ * completely immune to Daylight Saving Time transitions.
+ */
+export function diffCalendarDays(fromDateStr: string, toDateStr: string): number {
+  const from = parseDateOnly(fromDateStr);
+  const to = parseDateOnly(toDateStr);
+  const fromUtc = Date.UTC(from.getFullYear(), from.getMonth(), from.getDate());
+  const toUtc = Date.UTC(to.getFullYear(), to.getMonth(), to.getDate());
+  return Math.round((toUtc - fromUtc) / (1000 * 60 * 60 * 24));
+}
+
+/**
+ * Formats an ISO timestamp into a local `YYYY-MM-DDTHH:mm` string for `<input type="datetime-local">`.
+ */
+export function toDateTimeLocalInput(isoStr?: string | null): string {
+  if (!isoStr) return '';
+  const d = new Date(isoStr);
+  if (Number.isNaN(d.getTime())) return '';
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
 }
 
 export function getTaskDateKey(task: { due_date?: string | null; created_at?: string }): string {
@@ -146,10 +177,7 @@ export function formatDueBadge(
     return { label: 'Today', isOverdue: false, isToday: true, isTomorrow: false };
   }
 
-  const todayDate = parseDateOnly(today);
-  const targetDate = parseDateOnly(dueDate);
-  const diffTime = targetDate.getTime() - todayDate.getTime();
-  const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
+  const diffDays = diffCalendarDays(today, dueDate);
 
   if (diffDays === 1) {
     return { label: 'Tomorrow', isOverdue: false, isToday: false, isTomorrow: true };
@@ -165,6 +193,7 @@ export function formatDueBadge(
     };
   }
 
+  const targetDate = parseDateOnly(dueDate);
   const formatted = targetDate.toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',
@@ -172,7 +201,7 @@ export function formatDueBadge(
 
   return {
     label: formatted,
-    isOverdue: diffDays < 0,
+    isOverdue: diffDays < 0 && status !== 'done',
     isToday: false,
     isTomorrow: false,
   };

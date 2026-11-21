@@ -1,5 +1,5 @@
-import { RepeatPreset, TaskRepeatRule, WeekdayIndex } from '../types/task';
-import { formatDateOnly, parseDateOnly } from './taskDate';
+import { RepeatPreset, Subtask, Task, TaskRepeatRule, WeekdayIndex } from '../types/task';
+import { diffCalendarDays, formatDateOnly, getTaskDateKey, parseDateOnly } from './taskDate';
 
 export const WEEKDAY_OPTIONS: { index: WeekdayIndex; short: string; label: string }[] = [
   { index: 1, short: 'MON', label: 'Mon' },
@@ -21,7 +21,7 @@ const WEEKDAY_SHORT_MAP: Record<WeekdayIndex, string> = {
   6: 'Sat',
 };
 
-/** Monday-first sort order for displaying weekday lists */
+/** Monday-first sort order for displaying weekday lists and computing week boundaries */
 const MONDAY_FIRST_ORDER: Record<WeekdayIndex, number> = {
   1: 0,
   2: 1,
@@ -32,7 +32,12 @@ const MONDAY_FIRST_ORDER: Record<WeekdayIndex, number> = {
   0: 6,
 };
 
-export function createPresetRule(preset: Exclude<RepeatPreset, 'custom'>, anchorDateStr?: string): TaskRepeatRule {
+const PROJECTED_PREFIX = 'projected::';
+
+export function createPresetRule(
+  preset: Exclude<RepeatPreset, 'custom'>,
+  anchorDateStr?: string
+): TaskRepeatRule {
   switch (preset) {
     case 'daily':
       return { preset: 'daily', interval: 1, unit: 'days' };
@@ -50,12 +55,33 @@ export function createPresetRule(preset: Exclude<RepeatPreset, 'custom'>, anchor
   }
 }
 
+/**
+ * Keeps a `weekly` preset rule aligned with a task's date when the user changes its Date picker.
+ */
+export function syncRuleWithAnchorDate(
+  rule: TaskRepeatRule | null | undefined,
+  newAnchorDateStr?: string
+): TaskRepeatRule | null {
+  if (!rule) return null;
+  if (rule.preset === 'weekly' && newAnchorDateStr && /^\d{4}-\d{2}-\d{2}$/.test(newAnchorDateStr)) {
+    const dayIdx = parseDateOnly(newAnchorDateStr).getDay() as WeekdayIndex;
+    return {
+      ...rule,
+      weekdays: [dayIdx],
+    };
+  }
+  return rule;
+}
+
 export function formatRepeatLabel(rule?: TaskRepeatRule | null): string | null {
   if (!rule) return null;
 
   if (rule.preset === 'daily') return 'Daily';
   if (rule.preset === 'weekdays') return 'Weekdays';
-  if (rule.preset === 'weekly') return 'Weekly';
+  if (rule.preset === 'weekly') {
+    const wd = rule.weekdays?.[0];
+    return wd !== undefined ? `Weekly · ${WEEKDAY_SHORT_MAP[wd]}` : 'Weekly';
+  }
   if (rule.preset === 'monthly') return 'Monthly';
   if (rule.preset === 'yearly') return 'Yearly';
 
@@ -66,7 +92,7 @@ export function formatRepeatLabel(rule?: TaskRepeatRule | null): string | null {
   }
 
   if (rule.unit === 'weeks') {
-    const sortedDays = [...(rule.weekdays || [])].sort(
+    const sortedDays = Array.from(new Set(rule.weekdays || [])).sort(
       (a, b) => MONDAY_FIRST_ORDER[a] - MONDAY_FIRST_ORDER[b]
     );
     const daysText =
@@ -115,7 +141,7 @@ function addYearsClamped(base: Date, yearsToAdd: number): Date {
 }
 
 /**
- * Computes the next YYYY-MM-DD occurrence date after `currentDateStr` for the given repeat rule.
+ * Computes the next YYYY-MM-DD occurrence date strictly after `currentDateStr` for the given repeat rule.
  */
 export function getNextRepeatDate(currentDateStr: string, rule: TaskRepeatRule): string {
   const base = parseDateOnly(currentDateStr);
@@ -182,7 +208,94 @@ export function getNextRepeatDate(currentDateStr: string, rule: TaskRepeatRule):
 }
 
 /**
- * Shifts an ISO reminder timestamp by the day difference between two YYYY-MM-DD dates,
+ * Returns true if `targetDateStr` (strictly after `anchorDateStr`) is a scheduled repeat occurrence
+ * for a task anchored on `anchorDateStr` with the given `rule`.
+ */
+export function doesRepeatRuleMatchDate(
+  anchorDateStr: string,
+  targetDateStr: string,
+  rule: TaskRepeatRule | null | undefined
+): boolean {
+  if (!rule) return false;
+  if (!anchorDateStr || !targetDateStr) return false;
+  if (targetDateStr <= anchorDateStr) return false;
+
+  const anchor = parseDateOnly(anchorDateStr);
+  const target = parseDateOnly(targetDateStr);
+  const interval = Math.max(1, Math.floor(rule.interval || 1));
+
+  // Weekdays preset (Mon-Fri)
+  if (rule.preset === 'weekdays') {
+    const wd = target.getDay();
+    return wd >= 1 && wd <= 5;
+  }
+
+  // Daily / Every N days
+  if (rule.preset === 'daily' || rule.unit === 'days') {
+    const dayDiff = diffCalendarDays(anchorDateStr, targetDateStr);
+    return dayDiff > 0 && dayDiff % interval === 0;
+  }
+
+  // Weekly / Every N weeks on selected weekdays (Mon-Sun weeks)
+  if (rule.preset === 'weekly' || rule.unit === 'weeks') {
+    const selected =
+      rule.weekdays && rule.weekdays.length > 0
+        ? Array.from(new Set(rule.weekdays))
+        : [anchor.getDay() as WeekdayIndex];
+
+    const targetWd = target.getDay() as WeekdayIndex;
+    if (!selected.includes(targetWd)) return false;
+
+    const anchorOrder = MONDAY_FIRST_ORDER[anchor.getDay() as WeekdayIndex];
+    const targetOrder = MONDAY_FIRST_ORDER[targetWd];
+
+    const anchorMondayUtc =
+      Date.UTC(anchor.getFullYear(), anchor.getMonth(), anchor.getDate()) -
+      anchorOrder * 86400000;
+    const targetMondayUtc =
+      Date.UTC(target.getFullYear(), target.getMonth(), target.getDate()) -
+      targetOrder * 86400000;
+
+    const weekDiff = Math.round((targetMondayUtc - anchorMondayUtc) / (7 * 86400000));
+    return weekDiff >= 0 && weekDiff % interval === 0;
+  }
+
+  // Monthly / Every N months (clamped to end of shorter months)
+  if (rule.preset === 'monthly' || rule.unit === 'months') {
+    const monthDiff =
+      (target.getFullYear() - anchor.getFullYear()) * 12 +
+      (target.getMonth() - anchor.getMonth());
+    if (monthDiff <= 0 || monthDiff % interval !== 0) return false;
+
+    const lastDayOfTargetMonth = new Date(
+      target.getFullYear(),
+      target.getMonth() + 1,
+      0
+    ).getDate();
+    const expectedDay = Math.min(anchor.getDate(), lastDayOfTargetMonth);
+    return target.getDate() === expectedDay;
+  }
+
+  // Yearly / Every N years (Feb 29 clamped to Feb 28 on non-leap years)
+  if (rule.preset === 'yearly' || rule.unit === 'years') {
+    const yearDiff = target.getFullYear() - anchor.getFullYear();
+    if (yearDiff <= 0 || yearDiff % interval !== 0) return false;
+    if (target.getMonth() !== anchor.getMonth()) return false;
+
+    const lastDayOfTargetMonth = new Date(
+      target.getFullYear(),
+      target.getMonth() + 1,
+      0
+    ).getDate();
+    const expectedDay = Math.min(anchor.getDate(), lastDayOfTargetMonth);
+    return target.getDate() === expectedDay;
+  }
+
+  return false;
+}
+
+/**
+ * Shifts an ISO reminder timestamp by the exact calendar day difference between two YYYY-MM-DD dates,
  * preserving the local clock time.
  */
 export function shiftReminderForNextDate(
@@ -194,11 +307,51 @@ export function shiftReminderForNextDate(
   const parsedReminder = new Date(reminderAt);
   if (Number.isNaN(parsedReminder.getTime())) return null;
 
-  const fromDate = parseDateOnly(fromDateStr);
-  const toDate = parseDateOnly(toDateStr);
-  const dayDiff = Math.round((toDate.getTime() - fromDate.getTime()) / (1000 * 60 * 60 * 24));
-
+  const dayDiff = diffCalendarDays(fromDateStr, toDateStr);
   const shifted = new Date(parsedReminder);
   shifted.setDate(shifted.getDate() + dayDiff);
   return shifted.toISOString();
+}
+
+export function buildProjectedTaskId(sourceTaskId: string, targetDateStr: string): string {
+  return `${PROJECTED_PREFIX}${sourceTaskId}::${targetDateStr}`;
+}
+
+export function isProjectedTaskId(taskId: string): boolean {
+  return taskId.startsWith(PROJECTED_PREFIX);
+}
+
+export function parseProjectedTaskId(
+  taskId: string
+): { sourceTaskId: string; targetDate: string } | null {
+  if (!isProjectedTaskId(taskId)) return null;
+  const rest = taskId.slice(PROJECTED_PREFIX.length);
+  const splitIdx = rest.lastIndexOf('::');
+  if (splitIdx === -1) return null;
+  const sourceTaskId = rest.slice(0, splitIdx);
+  const targetDate = rest.slice(splitIdx + 2);
+  if (!sourceTaskId || !/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) return null;
+  return { sourceTaskId, targetDate };
+}
+
+/**
+ * Creates a clean virtual/projected occurrence of a pending repeating task for a future calendar date.
+ */
+export function createProjectedRepeatTask(sourceTask: Task, targetDateStr: string): Task {
+  const anchorDateStr = getTaskDateKey(sourceTask);
+  const freshSubtasks: Subtask[] = (sourceTask.subtasks || []).map((s, idx) => ({
+    id: `${s.id}::${targetDateStr}_${idx}`,
+    title: s.title,
+    completed: false,
+  }));
+
+  return {
+    ...sourceTask,
+    id: buildProjectedTaskId(sourceTask.id, targetDateStr),
+    status: 'pending',
+    due_date: targetDateStr,
+    reminder_at: shiftReminderForNextDate(sourceTask.reminder_at, anchorDateStr, targetDateStr),
+    subtasks: freshSubtasks,
+    completed_at: null,
+  };
 }

@@ -3,6 +3,7 @@ import { X, Calendar, Clock, Plus, ListChecks, Circle } from 'lucide-react';
 import { Subtask, Task, TaskPriority, TaskRepeatRule } from '../../types/task';
 import { Button, Input } from '../ui';
 import { getTodayString } from '../../utils/taskDate';
+import { syncRuleWithAnchorDate } from '../../utils/taskRepeat';
 import { RepeatPicker } from './RepeatPicker';
 
 interface TaskAddModalProps {
@@ -31,14 +32,29 @@ export const TaskAddModal: React.FC<TaskAddModalProps> = ({
   const [draftSubtask, setDraftSubtask] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  // Sync defaultDueDate whenever modal opens on a new selected day
+  // Reset form cleanly whenever modal opens fresh
   useEffect(() => {
     if (isOpen) {
+      setTitle('');
+      setDescription('');
+      setPriority('medium');
       setDueDate(defaultDueDate || getTodayString());
+      setReminder('');
+      setRepeatRule(null);
+      setSubtasks([]);
+      setDraftSubtask('');
+      setSubmitting(false);
     }
   }, [isOpen, defaultDueDate]);
 
   if (!isOpen) return null;
+
+  const handleDueDateChange = (nextDate: string) => {
+    setDueDate(nextDate);
+    if (nextDate) {
+      setRepeatRule((prev) => syncRuleWithAnchorDate(prev, nextDate));
+    }
+  };
 
   const handleAddDraftSubtask = () => {
     const trimmed = draftSubtask.trim();
@@ -65,6 +81,9 @@ export const TaskAddModal: React.FC<TaskAddModalProps> = ({
     e.preventDefault();
     if (!title.trim() || submitting) return;
 
+    const finalDueDate = dueDate || defaultDueDate || getTodayString();
+    const finalRepeatRule = syncRuleWithAnchorDate(repeatRule, finalDueDate);
+
     // Include any pending typed subtask automatically
     const finalSubtasks = draftSubtask.trim()
       ? [
@@ -85,21 +104,12 @@ export const TaskAddModal: React.FC<TaskAddModalProps> = ({
       await onSaveTask(title.trim(), {
         description: description.trim() || null,
         priority,
-        due_date: dueDate || defaultDueDate || getTodayString(),
+        due_date: finalDueDate,
         reminder_at: reminder ? new Date(reminder).toISOString() : null,
-        repeat_rule: repeatRule,
+        repeat_rule: finalRepeatRule,
         subtasks: finalSubtasks,
       });
 
-      // Reset form
-      setTitle('');
-      setDescription('');
-      setPriority('medium');
-      setDueDate(defaultDueDate || getTodayString());
-      setReminder('');
-      setRepeatRule(null);
-      setSubtasks([]);
-      setDraftSubtask('');
       onClose();
     } finally {
       setSubmitting(false);
@@ -123,7 +133,7 @@ export const TaskAddModal: React.FC<TaskAddModalProps> = ({
             </div>
             <div className="min-w-0">
               <h2 className="text-base font-bold text-[#111827] dark:text-[#f1f5f9] truncate">New Task</h2>
-              <p className="text-xs text-[#6b7280] dark:text-[#94a3b8] truncate">Add details & subtasks</p>
+              <p className="text-xs text-[#6b7280] dark:text-[#94a3b8] truncate">Add details &amp; subtasks</p>
             </div>
           </div>
           <button
@@ -265,7 +275,7 @@ export const TaskAddModal: React.FC<TaskAddModalProps> = ({
                   </label>
                   <button
                     type="button"
-                    onClick={() => setDueDate(getTodayString())}
+                    onClick={() => handleDueDateChange(getTodayString())}
                     className="text-[10px] font-semibold text-[#6366f1] dark:text-[#818cf8] hover:underline cursor-pointer shrink-0"
                   >
                     Set Today
@@ -274,7 +284,7 @@ export const TaskAddModal: React.FC<TaskAddModalProps> = ({
                 <input
                   type="date"
                   value={dueDate}
-                  onChange={(e) => setDueDate(e.target.value)}
+                  onChange={(e) => handleDueDateChange(e.target.value)}
                   className="block w-full min-w-0 max-w-full rounded-xl border border-[#e5e7eb] dark:border-[#334155] bg-white dark:bg-[#1e293b] px-3 py-2 text-xs text-[#111827] dark:text-[#f1f5f9] focus:outline-none focus:border-[#6366f1]"
                 />
               </div>

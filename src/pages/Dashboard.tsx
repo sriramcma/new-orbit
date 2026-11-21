@@ -319,13 +319,26 @@ export const Dashboard: React.FC = () => {
   }, [userId]);
 
   const handleToggleTask = async (taskId: string) => {
+    const target = recentTasks.find((t) => t.id === taskId);
+    const wasDueToday = target ? isTaskToday(target.due_date, target.created_at) : false;
+
     setRecentTasks((prev) => prev.filter((t) => t.id !== taskId));
     setTaskStats((prev) => ({
       ...prev,
       pending: Math.max(0, prev.pending - 1),
+      today: wasDueToday ? Math.max(0, prev.today - 1) : prev.today,
       done: prev.done + 1,
     }));
-    await taskService.toggleTaskStatus(userId, taskId);
+
+    const { spawnedTask } = await taskService.toggleTaskWithRepeat(userId, taskId, target);
+    if (spawnedTask) {
+      const spawnedIsToday = isTaskToday(spawnedTask.due_date, spawnedTask.created_at);
+      setTaskStats((prev) => ({
+        ...prev,
+        pending: prev.pending + 1,
+        today: spawnedIsToday ? prev.today + 1 : prev.today,
+      }));
+    }
   };
 
   const handleQuickBrainSubmit = async (e: React.FormEvent) => {

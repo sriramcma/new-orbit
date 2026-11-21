@@ -1,5 +1,7 @@
 import { supabase, isSupabaseConfigured } from '../supabaseClient';
 import { Subtask, Task, TaskPriority, TaskRepeatRule, TaskStatus } from '../types/task';
+import { getTaskDateKey } from '../utils/taskDate';
+import { getNextRepeatDate, shiftReminderForNextDate } from '../utils/taskRepeat';
 
 const LOCAL_STORAGE_PREFIX = 'orbit_tasks_cache_';
 const LOCAL_META_PREFIX = 'orbit_tasks_meta_';
@@ -227,6 +229,13 @@ async function updateWithSchemaFallback(
 }
 
 export const taskService = {
+  /**
+   * Keeps local cache aligned when external events (like Supabase Realtime) update React state.
+   */
+  syncLocalCache(userId: string, tasks: Task[]): void {
+    saveLocalTasks(userId, tasks.map(normalizeTask));
+  },
+
   async getTasks(userId: string): Promise<{ tasks: Task[]; fromDatabase: boolean; error?: string }> {
     const local = getLocalTasks(userId);
     const metaMap = getLocalMetaMap(userId);
@@ -269,14 +278,32 @@ export const taskService = {
       const unsyncedLocal = local.filter((t) => pendingIds.has(t.id) && !dbIdSet.has(t.id));
 
       // Attempt background sync for any unsynced tasks
+      const syncedOrRemaining: Task[] = [];
       for (const pendingTask of unsyncedLocal) {
-        const res = await insertWithSchemaFallback(pendingTask as unknown as Record<string, unknown>);
+        const res = await insertWithSchemaFallback(
+          pendingTask as unknown as Record<string, unknown>
+        );
         if (!res.error) {
           clearPendingSync(userId, pendingTask.id);
+          if (res.data) {
+            syncedOrRemaining.push(
+              normalizeTask({
+                ...res.data,
+                subtasks: Object.prototype.hasOwnProperty.call(res.data, 'subtasks')
+                  ? res.data.subtasks
+                  : pendingTask.subtasks,
+                repeat_rule: Object.prototype.hasOwnProperty.call(res.data, 'repeat_rule')
+                  ? res.data.repeat_rule
+                  : pendingTask.repeat_rule,
+              })
+            );
+            continue;
+          }
         }
+        syncedOrRemaining.push(pendingTask);
       }
 
-      const merged = [...unsyncedLocal, ...dbTasks];
+      const merged = [...syncedOrRemaining, ...dbTasks];
       saveLocalTasks(userId, merged);
       return { tasks: merged, fromDatabase: true };
     } catch (err: unknown) {
@@ -291,22 +318,26 @@ export const taskService = {
   async createTask(
     userId: string,
     title: string,
-    extra: Partial<Omit<Task, 'id' | 'user_id' | 'title' | 'status' | 'created_at'>> = {}
+    extra: Partial<Omit<Task, 'id' | 'user_id' | 'title' | 'status' | 'created_at'>> & {
+      status?: TaskStatus;
+      completed_at?: string | null;
+    } = {}
   ): Promise<{ task: Task; fromDatabase: boolean; error?: string }> {
     const newTask: Task = {
-      id: crypto.randomUUID
-        ? crypto.randomUUID()
-        : `task_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      id:
+        typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `task_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       user_id: userId,
       title: title.trim(),
       description: extra.description || null,
       priority: extra.priority || 'medium',
-      status: 'pending',
+      status: extra.status || 'pending',
       due_date: extra.due_date || null,
       reminder_at: extra.reminder_at || null,
       subtasks: Array.isArray(extra.subtasks) ? extra.subtasks : [],
       repeat_rule: extra.repeat_rule || null,
-      completed_at: null,
+      completed_at: extra.completed_at ?? (extra.status === 'done' ? new Date().toISOString() : null),
       created_at: new Date().toISOString(),
     };
 
@@ -318,7 +349,7 @@ export const taskService = {
 
     // Optimistic local update
     const current = getLocalTasks(userId);
-    const updated = [newTask, ...current];
+    const updated = [newTask, ...current.filter((t) => t.id !== newTask.id)];
     saveLocalTasks(userId, updated);
 
     if (!isSupabaseConfigured || !userId || userId.startsWith('demo-')) {
@@ -340,16 +371,15 @@ export const taskService = {
       if (data) {
         const mergedTask = normalizeTask({
           ...data,
-          subtasks:
-            Object.prototype.hasOwnProperty.call(data, 'subtasks')
-              ? data.subtasks
-              : newTask.subtasks,
-          repeat_rule:
-            Object.prototype.hasOwnProperty.call(data, 'repeat_rule')
-              ? data.repeat_rule
-              : newTask.repeat_rule,
+          subtasks: Object.prototype.hasOwnProperty.call(data, 'subtasks')
+            ? data.subtasks
+            : newTask.subtasks,
+          repeat_rule: Object.prototype.hasOwnProperty.call(data, 'repeat_rule')
+            ? data.repeat_rule
+            : newTask.repeat_rule,
         });
-        const finalTasks = updated.map((t) => (t.id === newTask.id ? mergedTask : t));
+        const latestLocal = getLocalTasks(userId);
+        const finalTasks = latestLocal.map((t) => (t.id === newTask.id ? mergedTask : t));
         saveLocalTasks(userId, finalTasks);
         return { task: mergedTask, fromDatabase: true };
       }
@@ -368,10 +398,11 @@ export const taskService = {
   async updateTask(
     userId: string,
     taskId: string,
-    updates: Partial<Task>
+    updates: Partial<Task>,
+    fallbackTask?: Task
   ): Promise<{ task: Task; fromDatabase: boolean; error?: string }> {
     const current = getLocalTasks(userId);
-    const existing = current.find((t) => t.id === taskId);
+    const existing = current.find((t) => t.id === taskId) || fallbackTask;
     if (!existing) {
       throw new Error('Task not found');
     }
@@ -388,7 +419,10 @@ export const taskService = {
       });
     }
 
-    const nextList = current.map((t) => (t.id === taskId ? updatedTask : t));
+    const existsInLocal = current.some((t) => t.id === taskId);
+    const nextList = existsInLocal
+      ? current.map((t) => (t.id === taskId ? updatedTask : t))
+      : [updatedTask, ...current];
     saveLocalTasks(userId, nextList);
 
     if (!isSupabaseConfigured || !userId || userId.startsWith('demo-')) {
@@ -416,6 +450,11 @@ export const taskService = {
             ? data.repeat_rule
             : updatedTask.repeat_rule,
         });
+        const latestLocal = getLocalTasks(userId);
+        saveLocalTasks(
+          userId,
+          latestLocal.map((t) => (t.id === taskId ? merged : t))
+        );
         return { task: merged, fromDatabase: true };
       }
 
@@ -432,35 +471,127 @@ export const taskService = {
   async updateSubtasks(
     userId: string,
     taskId: string,
-    subtasks: Subtask[]
+    subtasks: Subtask[],
+    fallbackTask?: Task
   ): Promise<{ task: Task; fromDatabase: boolean; error?: string }> {
-    return this.updateTask(userId, taskId, { subtasks });
+    return this.updateTask(userId, taskId, { subtasks }, fallbackTask);
   },
 
   async toggleTaskStatus(
     userId: string,
-    taskId: string
+    taskId: string,
+    fallbackTask?: Task
   ): Promise<{ task: Task; fromDatabase: boolean; error?: string }> {
     const current = getLocalTasks(userId);
-    const existing = current.find((t) => t.id === taskId);
+    const existing = current.find((t) => t.id === taskId) || fallbackTask;
     if (!existing) throw new Error('Task not found');
 
     const isDone = existing.status === 'done';
     const nextStatus: TaskStatus = isDone ? 'pending' : 'done';
     const nextCompletedAt = isDone ? null : new Date().toISOString();
 
-    return this.updateTask(userId, taskId, {
-      status: nextStatus,
-      completed_at: nextCompletedAt,
-    });
+    return this.updateTask(
+      userId,
+      taskId,
+      {
+        status: nextStatus,
+        completed_at: nextCompletedAt,
+      },
+      existing
+    );
+  },
+
+  /**
+   * Shared single-source-of-truth toggle handler for Tasks page & Dashboard:
+   * toggles status and, when completing a repeating task, safely creates the next occurrence
+   * if one does not already exist for that date.
+   */
+  async toggleTaskWithRepeat(
+    userId: string,
+    taskId: string,
+    fallbackTask?: Task
+  ): Promise<{
+    task: Task;
+    spawnedTask: Task | null;
+    nextDueDate: string | null;
+    error?: string;
+  }> {
+    const localBefore = getLocalTasks(userId);
+    const sourceTask = localBefore.find((t) => t.id === taskId) || fallbackTask;
+    if (!sourceTask) throw new Error('Task not found');
+
+    const toggleRes = await this.toggleTaskStatus(userId, taskId, sourceTask);
+    const updatedTask = toggleRes.task;
+
+    if (updatedTask.status === 'done' && sourceTask.repeat_rule) {
+      const currentDateKey = getTaskDateKey(sourceTask);
+      const nextDueDate = getNextRepeatDate(currentDateKey, sourceTask.repeat_rule);
+      const latestLocal = getLocalTasks(userId);
+
+      const normalizedTitle = sourceTask.title.trim().toLowerCase();
+      const alreadyExists = latestLocal.some(
+        (t) =>
+          t.id !== sourceTask.id &&
+          t.title.trim().toLowerCase() === normalizedTitle &&
+          getTaskDateKey(t) === nextDueDate
+      );
+
+      if (!alreadyExists) {
+        const resetSubtasks: Subtask[] = (sourceTask.subtasks || []).map((s, idx) => ({
+          id:
+            typeof crypto !== 'undefined' && crypto.randomUUID
+              ? crypto.randomUUID()
+              : `sub_${Date.now()}_${idx}`,
+          title: s.title,
+          completed: false,
+        }));
+
+        const nextReminder = shiftReminderForNextDate(
+          sourceTask.reminder_at,
+          currentDateKey,
+          nextDueDate
+        );
+
+        const { task: nextTask } = await this.createTask(userId, sourceTask.title, {
+          description: sourceTask.description || null,
+          priority: sourceTask.priority || 'medium',
+          due_date: nextDueDate,
+          reminder_at: nextReminder,
+          repeat_rule: sourceTask.repeat_rule,
+          subtasks: resetSubtasks,
+        });
+
+        return {
+          task: updatedTask,
+          spawnedTask: nextTask,
+          nextDueDate,
+          error: toggleRes.error,
+        };
+      }
+
+      return {
+        task: updatedTask,
+        spawnedTask: null,
+        nextDueDate,
+        error: toggleRes.error,
+      };
+    }
+
+    return {
+      task: updatedTask,
+      spawnedTask: null,
+      nextDueDate: null,
+      error: toggleRes.error,
+    };
   },
 
   async cyclePriority(
     userId: string,
-    taskId: string
+    taskId: string,
+    fallbackTask?: Task
   ): Promise<{ task: Task; fromDatabase: boolean; error?: string }> {
     const current = getLocalTasks(userId);
-    const existing = current.find((t) => t.id === taskId);
+    const existing = current.find((t) => t.id === taskId) || fallbackTask;
     if (!existing) throw new Error('Task not found');
 
     const map: Record<TaskPriority, TaskPriority> = {
@@ -470,9 +601,14 @@ export const taskService = {
     };
     const nextPriority = map[existing.priority || 'medium'];
 
-    return this.updateTask(userId, taskId, {
-      priority: nextPriority,
-    });
+    return this.updateTask(
+      userId,
+      taskId,
+      {
+        priority: nextPriority,
+      },
+      existing
+    );
   },
 
   async deleteTask(userId: string, taskId: string): Promise<{ success: boolean; error?: string }> {

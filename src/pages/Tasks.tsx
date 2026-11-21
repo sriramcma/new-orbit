@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Plus,
   Search,
@@ -17,15 +17,22 @@ import {
   formatShortDateLabel,
   getTaskDateKey,
   getTodayString,
-  isTaskOverdue,
 } from '../utils/taskDate';
-import { getNextRepeatDate, shiftReminderForNextDate } from '../utils/taskRepeat';
+import {
+  createProjectedRepeatTask,
+  doesRepeatRuleMatchDate,
+  isProjectedTaskId,
+  parseProjectedTaskId,
+  shiftReminderForNextDate,
+} from '../utils/taskRepeat';
 import { QuickAddBar } from '../components/tasks/QuickAddBar';
 import { DayCalendarStrip, DayTaskDotInfo } from '../components/tasks/DayCalendarStrip';
 import { TaskCard } from '../components/tasks/TaskCard';
 import { TaskAddModal } from '../components/tasks/TaskAddModal';
 import { TaskSchemaModal } from '../components/tasks/TaskSchemaModal';
 import { supabase, isSupabaseConfigured } from '../supabaseClient';
+
+const SEEDED_FLAG_PREFIX = 'orbit_tasks_seeded_';
 
 export const TasksPage: React.FC = () => {
   const { user } = useAuth();
@@ -43,17 +50,37 @@ export const TasksPage: React.FC = () => {
   const [isSchemaModalOpen, setIsSchemaModalOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3000);
-  };
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const togglingIdsRef = useRef<Set<string>>(new Set());
 
-  // 1. Initial Load & Seed starter tasks if empty
+  const showToast = useCallback((msg: string) => {
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+    }
+    setToastMessage(msg);
+    toastTimerRef.current = setTimeout(() => {
+      setToastMessage(null);
+      toastTimerRef.current = null;
+    }, 3000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
+
+  // 1. Initial Load & Seed starter tasks once for brand-new users only
   const loadTasks = useCallback(async () => {
     setLoading(true);
     const { tasks: fetched } = await taskService.getTasks(userId);
+    const seededKey = `${SEEDED_FLAG_PREFIX}${userId}`;
+    const alreadySeeded =
+      typeof window !== 'undefined' && localStorage.getItem(seededKey) === '1';
 
-    if (fetched.length === 0) {
+    if (fetched.length === 0 && !alreadySeeded) {
       const today = getTodayString();
       const starter1 = await taskService.createTask(
         userId,
@@ -65,7 +92,7 @@ export const TasksPage: React.FC = () => {
           subtasks: [
             { id: 'sub_starter_1', title: 'Tap a day on the calendar to switch dates', completed: true },
             { id: 'sub_starter_2', title: 'Add your own subtask right below', completed: false },
-            { id: 'sub_starter_3', title: 'Tap NOV 2026 to open the full month view', completed: false },
+            { id: 'sub_starter_3', title: 'Tap the month label above to open full month view', completed: false },
           ],
         }
       );
@@ -78,8 +105,14 @@ export const TasksPage: React.FC = () => {
           subtasks: [],
         }
       );
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(seededKey, '1');
+      }
       setTasks([starter1.task, starter2.task]);
     } else {
+      if (fetched.length > 0 && typeof window !== 'undefined') {
+        localStorage.setItem(seededKey, '1');
+      }
       setTasks(fetched);
     }
     setLoading(false);
@@ -89,7 +122,7 @@ export const TasksPage: React.FC = () => {
     loadTasks();
   }, [loadTasks]);
 
-  // 2. Realtime Subscription (Postgres Changes)
+  // 2. Realtime Subscription (Postgres Changes) — synced to both React state & local cache
   useEffect(() => {
     if (!isSupabaseConfigured || !user?.id || user.id.startsWith('demo-')) {
       return;
@@ -111,7 +144,7 @@ export const TasksPage: React.FC = () => {
               const newTask = payload.new as Task;
               setTasks((prev) => {
                 if (prev.some((t) => t.id === newTask.id)) return prev;
-                return [
+                const next = [
                   {
                     ...newTask,
                     subtasks: newTask.subtasks || [],
@@ -119,26 +152,36 @@ export const TasksPage: React.FC = () => {
                   },
                   ...prev,
                 ];
+                taskService.syncLocalCache(user.id, next);
+                return next;
               });
             } else if (payload.eventType === 'UPDATE') {
               const updated = payload.new as Task;
               const hasSubtasks = Object.prototype.hasOwnProperty.call(updated, 'subtasks');
               const hasRepeat = Object.prototype.hasOwnProperty.call(updated, 'repeat_rule');
-              setTasks((prev) =>
-                prev.map((t) =>
+              setTasks((prev) => {
+                const next = prev.map((t) =>
                   t.id === updated.id
                     ? {
                         ...t,
                         ...updated,
                         subtasks: hasSubtasks ? updated.subtasks || [] : t.subtasks || [],
-                        repeat_rule: hasRepeat ? updated.repeat_rule || null : t.repeat_rule || null,
+                        repeat_rule: hasRepeat
+                          ? updated.repeat_rule || null
+                          : t.repeat_rule || null,
                       }
                     : t
-                )
-              );
+                );
+                taskService.syncLocalCache(user.id, next);
+                return next;
+              });
             } else if (payload.eventType === 'DELETE') {
               const deletedId = (payload.old as { id: string }).id;
-              setTasks((prev) => prev.filter((t) => t.id !== deletedId));
+              setTasks((prev) => {
+                const next = prev.filter((t) => t.id !== deletedId);
+                taskService.syncLocalCache(user.id, next);
+                return next;
+              });
             }
           }
         )
@@ -158,6 +201,9 @@ export const TasksPage: React.FC = () => {
       due_date: selectedDate,
       subtasks: [],
     });
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(`${SEEDED_FLAG_PREFIX}${userId}`, '1');
+    }
     setTasks((prev) => [task, ...prev.filter((t) => t.id !== task.id)]);
     showToast(`Added for ${formatShortDateLabel(selectedDate)}`);
     if (error && !error.includes('relation "public.tasks" does not exist')) {
@@ -175,83 +221,114 @@ export const TasksPage: React.FC = () => {
       ...extra,
       due_date: targetDate,
     });
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(`${SEEDED_FLAG_PREFIX}${userId}`, '1');
+    }
     setTasks((prev) => [task, ...prev.filter((t) => t.id !== task.id)]);
     if (targetDate && targetDate !== selectedDate) {
       setSelectedDate(targetDate);
     }
-    showToast('Task created');
+    showToast(task.repeat_rule ? 'Repeating task created' : 'Task created');
   };
 
   // 5. Toggle status (mark done / pending) + auto-spawn next repeat occurrence
   const handleToggleStatus = async (taskId: string) => {
-    const currentTask = tasks.find((t) => t.id === taskId);
-    if (!currentTask) return;
+    if (togglingIdsRef.current.has(taskId)) return;
+    togglingIdsRef.current.add(taskId);
 
-    const nextStatus = currentTask.status === 'done' ? 'pending' : 'done';
-    setTasks((prev) =>
-      prev.map((t) =>
-        t.id === taskId
-          ? {
-              ...t,
-              status: nextStatus,
-              completed_at: nextStatus === 'done' ? new Date().toISOString() : null,
-            }
-          : t
-      )
-    );
+    try {
+      // Case A: Completing a projected upcoming repeat occurrence -> materialize as Done on that date
+      const projectedInfo = parseProjectedTaskId(taskId);
+      if (projectedInfo) {
+        const sourceTask = tasks.find((t) => t.id === projectedInfo.sourceTaskId);
+        if (!sourceTask) return;
 
-    await taskService.toggleTaskStatus(userId, taskId);
-
-    // If marking a repeating task as done, schedule its next occurrence automatically
-    if (nextStatus === 'done' && currentTask.repeat_rule) {
-      const currentDateKey = getTaskDateKey(currentTask);
-      const nextDueDate = getNextRepeatDate(currentDateKey, currentTask.repeat_rule);
-
-      // Avoid duplicating if a pending repeat for that exact date already exists
-      const alreadyScheduled = tasks.some(
-        (t) =>
-          t.id !== currentTask.id &&
-          t.status === 'pending' &&
-          t.title === currentTask.title &&
-          getTaskDateKey(t) === nextDueDate
-      );
-
-      if (!alreadyScheduled) {
-        const resetSubtasks: Subtask[] = (currentTask.subtasks || []).map((s, idx) => ({
+        const sourceDateKey = getTaskDateKey(sourceTask);
+        const freshSubtasks: Subtask[] = (sourceTask.subtasks || []).map((s, idx) => ({
           id:
             typeof crypto !== 'undefined' && crypto.randomUUID
               ? crypto.randomUUID()
               : `sub_${Date.now()}_${idx}`,
           title: s.title,
-          completed: false,
+          completed: true,
         }));
 
-        const nextReminder = shiftReminderForNextDate(
-          currentTask.reminder_at,
-          currentDateKey,
-          nextDueDate
-        );
-
-        const { task: nextTask } = await taskService.createTask(userId, currentTask.title, {
-          description: currentTask.description || null,
-          priority: currentTask.priority || 'medium',
-          due_date: nextDueDate,
-          reminder_at: nextReminder,
-          repeat_rule: currentTask.repeat_rule,
-          subtasks: resetSubtasks,
+        const { task: materialized } = await taskService.createTask(userId, sourceTask.title, {
+          description: sourceTask.description || null,
+          priority: sourceTask.priority || 'medium',
+          status: 'done',
+          completed_at: new Date().toISOString(),
+          due_date: projectedInfo.targetDate,
+          reminder_at: shiftReminderForNextDate(
+            sourceTask.reminder_at,
+            sourceDateKey,
+            projectedInfo.targetDate
+          ),
+          repeat_rule: sourceTask.repeat_rule || null,
+          subtasks: freshSubtasks,
         });
 
-        setTasks((prev) => [nextTask, ...prev.filter((t) => t.id !== nextTask.id)]);
+        setTasks((prev) => [materialized, ...prev.filter((t) => t.id !== materialized.id)]);
+        if (expandedTaskId === taskId) {
+          setExpandedTaskId(materialized.id);
+        }
+        showToast(`Completed for ${formatShortDateLabel(projectedInfo.targetDate)}!`);
+        return;
+      }
+
+      // Case B: Toggling a real task
+      const currentTask = tasks.find((t) => t.id === taskId);
+      if (!currentTask) return;
+
+      const nextStatus = currentTask.status === 'done' ? 'pending' : 'done';
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === taskId
+            ? {
+                ...t,
+                status: nextStatus,
+                completed_at: nextStatus === 'done' ? new Date().toISOString() : null,
+              }
+            : t
+        )
+      );
+
+      const { spawnedTask, nextDueDate } = await taskService.toggleTaskWithRepeat(
+        userId,
+        taskId,
+        currentTask
+      );
+
+      if (spawnedTask && nextDueDate) {
+        setTasks((prev) => [spawnedTask, ...prev.filter((t) => t.id !== spawnedTask.id)]);
         showToast(`Done! Next repeat on ${formatShortDateLabel(nextDueDate)}`);
         return;
       }
-    }
 
-    showToast(nextStatus === 'done' ? 'Task completed!' : 'Task marked as pending');
+      showToast(nextStatus === 'done' ? 'Task completed!' : 'Task marked as pending');
+    } finally {
+      togglingIdsRef.current.delete(taskId);
+    }
   };
 
-  // 6. Delete task
+  // 6. Delete task (or stop repeating if triggered on a projected upcoming occurrence)
   const handleDeleteTask = async (taskId: string) => {
+    const projectedInfo = parseProjectedTaskId(taskId);
+    if (projectedInfo) {
+      const sourceTask = tasks.find((t) => t.id === projectedInfo.sourceTaskId);
+      if (!sourceTask) return;
+
+      setTasks((prev) =>
+        prev.map((t) => (t.id === sourceTask.id ? { ...t, repeat_rule: null } : t))
+      );
+      if (expandedTaskId === taskId) {
+        setExpandedTaskId(null);
+      }
+      showToast('Repeat stopped');
+      await taskService.updateTask(userId, sourceTask.id, { repeat_rule: null }, sourceTask);
+      return;
+    }
+
     setTasks((prev) => prev.filter((t) => t.id !== taskId));
     if (expandedTaskId === taskId) {
       setExpandedTaskId(null);
@@ -260,69 +337,180 @@ export const TasksPage: React.FC = () => {
     await taskService.deleteTask(userId, taskId);
   };
 
-  // 7. Update task details
+  // 7. Update task details (for projected cards, updates the repeating source schedule)
   const handleUpdateTask = async (taskId: string, updates: Partial<Task>) => {
+    const projectedInfo = parseProjectedTaskId(taskId);
+    if (projectedInfo) {
+      const sourceTask = tasks.find((t) => t.id === projectedInfo.sourceTaskId);
+      if (!sourceTask) return;
+
+      const { due_date: _ignoredDueDate, ...seriesUpdates } = updates;
+      setTasks((prev) =>
+        prev.map((t) => (t.id === sourceTask.id ? { ...t, ...seriesUpdates } : t))
+      );
+      if (seriesUpdates.repeat_rule === null && expandedTaskId === taskId) {
+        setExpandedTaskId(null);
+      }
+      showToast(seriesUpdates.repeat_rule === null ? 'Repeat stopped' : 'Repeating schedule updated');
+      await taskService.updateTask(userId, sourceTask.id, seriesUpdates, sourceTask);
+      return;
+    }
+
+    const existingTask = tasks.find((t) => t.id === taskId);
     setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, ...updates } : t)));
     showToast('Task updated');
-    await taskService.updateTask(userId, taskId, updates);
+    await taskService.updateTask(userId, taskId, updates, existingTask);
   };
 
-  // 8. Instant-save Subtasks update
+  // 8. Instant-save Subtasks update (materializes projected repeat card into a real task for that date)
   const handleUpdateSubtasks = async (taskId: string, subtasks: Subtask[]) => {
+    const projectedInfo = parseProjectedTaskId(taskId);
+    if (projectedInfo) {
+      const sourceTask = tasks.find((t) => t.id === projectedInfo.sourceTaskId);
+      if (!sourceTask) return;
+
+      const sourceDateKey = getTaskDateKey(sourceTask);
+      const cleanSubtasks: Subtask[] = subtasks.map((s, idx) => ({
+        id:
+          typeof crypto !== 'undefined' && crypto.randomUUID
+            ? crypto.randomUUID()
+            : `sub_${Date.now()}_${idx}`,
+        title: s.title,
+        completed: s.completed,
+      }));
+
+      const { task: materialized } = await taskService.createTask(userId, sourceTask.title, {
+        description: sourceTask.description || null,
+        priority: sourceTask.priority || 'medium',
+        due_date: projectedInfo.targetDate,
+        reminder_at: shiftReminderForNextDate(
+          sourceTask.reminder_at,
+          sourceDateKey,
+          projectedInfo.targetDate
+        ),
+        repeat_rule: sourceTask.repeat_rule || null,
+        subtasks: cleanSubtasks,
+      });
+
+      setTasks((prev) => [materialized, ...prev.filter((t) => t.id !== materialized.id)]);
+      if (expandedTaskId === taskId) {
+        setExpandedTaskId(materialized.id);
+      }
+      return;
+    }
+
+    const existingTask = tasks.find((t) => t.id === taskId);
     setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, subtasks } : t)));
-    await taskService.updateSubtasks(userId, taskId, subtasks);
+    await taskService.updateSubtasks(userId, taskId, subtasks, existingTask);
   };
 
   // 9. Cycle Priority
   const handleCyclePriority = async (taskId: string) => {
-    const t = tasks.find((item) => item.id === taskId);
+    const projectedInfo = parseProjectedTaskId(taskId);
+    const targetId = projectedInfo ? projectedInfo.sourceTaskId : taskId;
+
+    const t = tasks.find((item) => item.id === targetId);
     if (!t) return;
     const nextMap = { low: 'medium', medium: 'high', high: 'low' } as const;
     const nextPriority = nextMap[t.priority || 'medium'];
 
     setTasks((prev) =>
-      prev.map((item) => (item.id === taskId ? { ...item, priority: nextPriority } : item))
+      prev.map((item) => (item.id === targetId ? { ...item, priority: nextPriority } : item))
     );
     showToast(`Priority set to ${nextPriority}`);
-    await taskService.cyclePriority(userId, taskId);
+    await taskService.cyclePriority(userId, targetId, t);
   };
 
   // 10. Move overdue task to Today
   const handleMoveToToday = async (taskId: string) => {
     const today = getTodayString();
+    const existingTask = tasks.find((t) => t.id === taskId);
     setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, due_date: today } : t)));
     showToast('Moved to Today');
-    await taskService.updateTask(userId, taskId, { due_date: today });
+    await taskService.updateTask(userId, taskId, { due_date: today }, existingTask);
   };
 
-  // 11. Build calendar dot map across all dates
-  const dayCountsMap = useMemo(() => {
-    const map: Record<string, DayTaskDotInfo> = {};
+  // 11. Active repeating tasks (pending tasks with a repeat_rule) & real tasks grouped by date
+  const activeRepeatingTasks = useMemo(
+    () => tasks.filter((t) => t.status === 'pending' && Boolean(t.repeat_rule)),
+    [tasks]
+  );
+
+  const realTasksByDate = useMemo(() => {
+    const map: Record<string, Task[]> = {};
     tasks.forEach((t) => {
       const key = getTaskDateKey(t);
-      if (!map[key]) {
-        map[key] = { pending: 0, done: 0, hasOverdue: false };
-      }
-      if (t.status === 'done') {
-        map[key].done += 1;
-      } else {
-        map[key].pending += 1;
-        if (isTaskOverdue(t.due_date, t.status)) {
-          map[key].hasOverdue = true;
-        }
-      }
+      if (!map[key]) map[key] = [];
+      map[key].push(t);
     });
     return map;
   }, [tasks]);
 
-  // 12. Overdue tasks (from previous days, still pending)
+  const getProjectedTasksForDate = useCallback(
+    (dateStr: string): Task[] => {
+      if (activeRepeatingTasks.length === 0) return [];
+      const existingOnDate = realTasksByDate[dateStr] || [];
+      const seenTitles = new Set(existingOnDate.map((t) => t.title.trim().toLowerCase()));
+      const projected: Task[] = [];
+
+      for (const src of activeRepeatingTasks) {
+        const anchorDate = getTaskDateKey(src);
+        if (!doesRepeatRuleMatchDate(anchorDate, dateStr, src.repeat_rule)) continue;
+        const normTitle = src.title.trim().toLowerCase();
+        if (seenTitles.has(normTitle)) continue;
+        seenTitles.add(normTitle);
+        projected.push(createProjectedRepeatTask(src, dateStr));
+      }
+
+      return projected;
+    },
+    [activeRepeatingTasks, realTasksByDate]
+  );
+
+  // 12. Dynamic dot info for any calendar date (week strip & expandable month grid)
+  const getDayDotInfo = useCallback(
+    (dateStr: string): DayTaskDotInfo | undefined => {
+      const realList = realTasksByDate[dateStr] || [];
+      const projectedList = getProjectedTasksForDate(dateStr);
+
+      if (realList.length === 0 && projectedList.length === 0) {
+        return undefined;
+      }
+
+      let pending = 0;
+      let done = 0;
+      let hasOverdue = false;
+      let hasRepeat = projectedList.length > 0;
+
+      for (const t of realList) {
+        if (t.status === 'done') {
+          done += 1;
+        } else {
+          pending += 1;
+          if (dateStr < todayStr) {
+            hasOverdue = true;
+          }
+          if (t.repeat_rule) {
+            hasRepeat = true;
+          }
+        }
+      }
+
+      pending += projectedList.length;
+
+      return { pending, done, hasOverdue, hasRepeat };
+    },
+    [realTasksByDate, getProjectedTasksForDate, todayStr]
+  );
+
+  // 13. Overdue tasks (from previous days, still pending)
   const overdueTasks = useMemo(() => {
     return tasks
       .filter((t) => t.status !== 'done' && getTaskDateKey(t) < todayStr)
       .sort((a, b) => getTaskDateKey(a).localeCompare(getTaskDateKey(b)));
   }, [tasks, todayStr]);
 
-  // 13. Visible tasks for selected day OR global search results
+  // 14. Visible tasks for selected day (real + projected repeat occurrences) OR global search results
   const isSearching = searchQuery.trim().length > 0;
 
   const visibleTasks = useMemo(() => {
@@ -337,16 +525,21 @@ export const TasksPage: React.FC = () => {
           (t.subtasks || []).some((s) => s.title.toLowerCase().includes(q))
       );
     } else {
-      list = tasks.filter((t) => getTaskDateKey(t) === selectedDate);
+      const realForDay = realTasksByDate[selectedDate] || [];
+      const projectedForDay = getProjectedTasksForDate(selectedDate);
+      list = [...realForDay, ...projectedForDay];
     }
 
     return [...list].sort((a, b) => {
       if (a.status !== b.status) {
         return a.status === 'done' ? 1 : -1;
       }
+      const aProj = isProjectedTaskId(a.id) ? 1 : 0;
+      const bProj = isProjectedTaskId(b.id) ? 1 : 0;
+      if (aProj !== bProj) return aProj - bProj;
       return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
     });
-  }, [tasks, selectedDate, searchQuery, isSearching]);
+  }, [tasks, realTasksByDate, getProjectedTasksForDate, selectedDate, searchQuery, isSearching]);
 
   const selectedDayDoneCount = useMemo(
     () => visibleTasks.filter((t) => t.status === 'done').length,
@@ -443,7 +636,7 @@ export const TasksPage: React.FC = () => {
           setSelectedDate(dateStr);
           setExpandedTaskId(null);
         }}
-        dayCountsMap={dayCountsMap}
+        getDayDotInfo={getDayDotInfo}
       />
 
       {/* QUICK ADD BAR (Schedules directly onto selected day) */}
@@ -511,23 +704,27 @@ export const TasksPage: React.FC = () => {
             </p>
           </div>
         ) : (
-          visibleTasks.map((task) => (
-            <TaskCard
-              key={task.id}
-              task={task}
-              isExpanded={expandedTaskId === task.id}
-              showDateBadge={isSearching}
-              onToggleExpand={() =>
-                setExpandedTaskId(expandedTaskId === task.id ? null : task.id)
-              }
-              onToggleStatus={handleToggleStatus}
-              onDelete={handleDeleteTask}
-              onUpdate={handleUpdateTask}
-              onUpdateSubtasks={handleUpdateSubtasks}
-              onCyclePriority={handleCyclePriority}
-              onMoveToToday={handleMoveToToday}
-            />
-          ))
+          visibleTasks.map((task) => {
+            const projected = isProjectedTaskId(task.id);
+            return (
+              <TaskCard
+                key={task.id}
+                task={task}
+                isExpanded={expandedTaskId === task.id}
+                isProjected={projected}
+                showDateBadge={isSearching}
+                onToggleExpand={() =>
+                  setExpandedTaskId(expandedTaskId === task.id ? null : task.id)
+                }
+                onToggleStatus={handleToggleStatus}
+                onDelete={handleDeleteTask}
+                onUpdate={handleUpdateTask}
+                onUpdateSubtasks={handleUpdateSubtasks}
+                onCyclePriority={handleCyclePriority}
+                onMoveToToday={handleMoveToToday}
+              />
+            );
+          })
         )}
       </div>
 
