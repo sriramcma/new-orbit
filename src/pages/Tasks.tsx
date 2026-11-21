@@ -25,7 +25,6 @@ import {
   parseProjectedTaskId,
   shiftReminderForNextDate,
 } from '../utils/taskRepeat';
-import { QuickAddBar } from '../components/tasks/QuickAddBar';
 import { DayCalendarStrip, DayTaskDotInfo } from '../components/tasks/DayCalendarStrip';
 import { TaskCard } from '../components/tasks/TaskCard';
 import { TaskAddModal } from '../components/tasks/TaskAddModal';
@@ -195,23 +194,7 @@ export const TasksPage: React.FC = () => {
     }
   }, [user?.id]);
 
-  // 3. Quick Add Task handler (automatically schedules for selectedDate)
-  const handleQuickAdd = async (title: string) => {
-    const { task, error } = await taskService.createTask(userId, title, {
-      due_date: selectedDate,
-      subtasks: [],
-    });
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(`${SEEDED_FLAG_PREFIX}${userId}`, '1');
-    }
-    setTasks((prev) => [task, ...prev.filter((t) => t.id !== task.id)]);
-    showToast(`Added for ${formatShortDateLabel(selectedDate)}`);
-    if (error && !error.includes('relation "public.tasks" does not exist')) {
-      showToast(`Saved locally: ${error}`);
-    }
-  };
-
-  // 4. Detailed Add Task handler (via FAB modal)
+  // 3. Detailed Add Task handler (via FAB modal)
   const handleDetailedAdd = async (
     title: string,
     extra: Partial<Omit<Task, 'id' | 'user_id' | 'title' | 'status' | 'created_at'>>
@@ -639,12 +622,6 @@ export const TasksPage: React.FC = () => {
         getDayDotInfo={getDayDotInfo}
       />
 
-      {/* QUICK ADD BAR (Schedules directly onto selected day) */}
-      <QuickAddBar
-        onAddTask={handleQuickAdd}
-        placeholder={`Add a task for ${selectedDayLabel}...`}
-      />
-
       {/* DAY PROGRESS SUMMARY */}
       {!loading && visibleTasks.length > 0 && (
         <div className="px-1 space-y-1.5">
@@ -700,7 +677,7 @@ export const TasksPage: React.FC = () => {
             <p className="text-xs text-[#6b7280] dark:text-[#94a3b8] max-w-xs mx-auto">
               {isSearching
                 ? 'Try a different keyword or clear the search bar.'
-                : 'Type above or tap + to add a task with subtasks for this day.'}
+                : 'Tap + to add a task with subtasks for this day.'}
             </p>
           </div>
         ) : (
