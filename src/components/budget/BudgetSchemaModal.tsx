@@ -25,7 +25,12 @@ export const BudgetSchemaModal: React.FC<BudgetSchemaModalProps> = ({ isOpen, on
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200">
+    <div
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200"
+    >
       <div className="w-full max-w-[440px] bg-white dark:bg-[#1e293b] rounded-2xl shadow-2xl border border-[#e5e7eb] dark:border-[#334155] overflow-hidden flex flex-col max-h-[90vh] transition-colors duration-200">
         
         {/* Header */}
@@ -39,7 +44,7 @@ export const BudgetSchemaModal: React.FC<BudgetSchemaModalProps> = ({ isOpen, on
                 Budget Database Schema
               </h3>
               <p className="text-[11px] text-[#6b7280] dark:text-[#94a3b8]">
-                4 tables: categories, budgets, recurring & planned
+                5 tables: categories, budgets, recurring, planned & templates
               </p>
             </div>
           </div>

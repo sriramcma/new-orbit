@@ -8,10 +8,13 @@ import {
   PlannedPurchaseStatus,
   MonthSummary,
 } from '../types/budget';
+import { computeBudgetPlanBreakdown } from '../utils/budgetUtils';
 
 const LS_CATEGORIES = 'orbit_categories_cache_';
+const LS_CATEGORIES_SEEDED = 'orbit_categories_seeded_';
 const LS_BUDGETS = 'orbit_budgets_cache_';
 const LS_RECURRING = 'orbit_recurring_cache_';
+const LS_RECURRING_SEEDED = 'orbit_recurring_seeded_';
 const LS_PLANNED = 'orbit_planned_cache_';
 const LS_TEMPLATES = 'orbit_templates_cache_';
 
@@ -106,22 +109,69 @@ CREATE POLICY "Users can manage their own budget templates"
 CREATE INDEX IF NOT EXISTS idx_tpl_user ON public.budget_templates(user_id);
 `;
 
-const STARTER_CATEGORIES: Array<{ name: string; icon: string; color: string; defaultAllocation: number }> = [
-  { name: 'Savings & Investments', icon: 'PiggyBank', color: 'emerald', defaultAllocation: 15000 },
-  { name: 'Bills & Utilities', icon: 'Zap', color: 'indigo', defaultAllocation: 12000 },
-  { name: 'Food & Groceries', icon: 'Utensils', color: 'amber', defaultAllocation: 10000 },
-  { name: 'Shopping & Grooming', icon: 'ShoppingBag', color: 'purple', defaultAllocation: 5000 },
-  { name: 'Home & Living', icon: 'Home', color: 'cyan', defaultAllocation: 8000 },
+const STARTER_CATEGORIES: Array<{ name: string; icon: string; color: string }> = [
+  { name: 'Savings & Investments', icon: 'PiggyBank', color: 'emerald' },
+  { name: 'Bills & Utilities', icon: 'Zap', color: 'indigo' },
+  { name: 'Food & Groceries', icon: 'Utensils', color: 'amber' },
+  { name: 'Shopping & Grooming', icon: 'ShoppingBag', color: 'purple' },
+  { name: 'Home & Living', icon: 'Home', color: 'cyan' },
 ];
+
+function canUseSupabase(userId: string): boolean {
+  return Boolean(
+    isSupabaseConfigured &&
+      userId &&
+      !userId.startsWith('demo-') &&
+      userId !== 'guest_user'
+  );
+}
+
+function readJson<T>(key: string, fallback: T): T {
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === null) return fallback;
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJson(key: string, value: unknown): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (err) {
+    console.error('Budget localStorage write failed:', err);
+  }
+}
+
+function normalizeRecurring(raw: RecurringExpense): RecurringExpense {
+  return {
+    ...raw,
+    amount: Number(raw.amount) || 0,
+    day_of_month: Math.max(1, Math.min(31, Number(raw.day_of_month) || 1)),
+    active: raw.active !== undefined ? Boolean(raw.active) : true,
+  };
+}
+
+function normalizePlanned(raw: PlannedPurchase): PlannedPurchase {
+  return {
+    ...raw,
+    amount: Number(raw.amount) || 0,
+    status: raw.status || 'planned',
+  };
+}
 
 class BudgetService {
   // ================= CATEGORIES =================
 
   async fetchCategories(userId: string): Promise<Category[]> {
     const cacheKey = `${LS_CATEGORIES}${userId}`;
-    const cachedStr = localStorage.getItem(cacheKey);
+    const seededKey = `${LS_CATEGORIES_SEEDED}${userId}`;
+    const alreadySeeded = typeof window !== 'undefined' && localStorage.getItem(seededKey) === '1';
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
         const { data, error } = await supabase
           .from('categories')
@@ -131,34 +181,39 @@ class BudgetService {
 
         if (!error && data) {
           if (data.length > 0) {
-            localStorage.setItem(cacheKey, JSON.stringify(data));
+            writeJson(cacheKey, data);
+            if (typeof window !== 'undefined') localStorage.setItem(seededKey, '1');
             return data as Category[];
-          } else {
-            // Seed starter categories for fresh user
-            const seeded = await this.seedStarterCategories(userId);
-            return seeded;
           }
+          if (!alreadySeeded) {
+            return await this.seedStarterCategories(userId);
+          }
+          writeJson(cacheKey, []);
+          return [];
         }
       } catch (err) {
         console.warn('Failed fetching categories from Supabase, using cache:', err);
       }
     }
 
-    if (cachedStr) {
-      try {
-        const parsed = JSON.parse(cachedStr);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      } catch {}
+    const cached = readJson<Category[] | null>(cacheKey, null);
+    if (Array.isArray(cached)) {
+      if (cached.length > 0 || alreadySeeded) {
+        if (cached.length > 0 && typeof window !== 'undefined') {
+          localStorage.setItem(seededKey, '1');
+        }
+        return cached;
+      }
     }
 
-    // Default local seed
     return this.seedStarterCategories(userId);
   }
 
   async seedStarterCategories(userId: string): Promise<Category[]> {
     const now = new Date().toISOString();
+    const baseTs = Date.now();
     const starterList: Category[] = STARTER_CATEGORIES.map((c, idx) => ({
-      id: `cat_starter_${idx + 1}_${Date.now()}`,
+      id: `cat_starter_${idx + 1}_${baseTs}`,
       user_id: userId,
       name: c.name,
       icon: c.icon,
@@ -166,7 +221,11 @@ class BudgetService {
       created_at: now,
     }));
 
-    if (isSupabaseConfigured) {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(`${LS_CATEGORIES_SEEDED}${userId}`, '1');
+    }
+
+    if (canUseSupabase(userId)) {
       try {
         const inserts = starterList.map((item) => ({
           user_id: userId,
@@ -176,7 +235,7 @@ class BudgetService {
         }));
         const { data, error } = await supabase.from('categories').insert(inserts).select();
         if (!error && data && data.length > 0) {
-          localStorage.setItem(`${LS_CATEGORIES}${userId}`, JSON.stringify(data));
+          writeJson(`${LS_CATEGORIES}${userId}`, data);
           return data as Category[];
         }
       } catch (err) {
@@ -184,7 +243,7 @@ class BudgetService {
       }
     }
 
-    localStorage.setItem(`${LS_CATEGORIES}${userId}`, JSON.stringify(starterList));
+    writeJson(`${LS_CATEGORIES}${userId}`, starterList);
     return starterList;
   }
 
@@ -193,35 +252,43 @@ class BudgetService {
     category: { name: string; icon: string; color: string }
   ): Promise<Category> {
     const newCat: Category = {
-      ...category,
-      id: `cat_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      name: category.name.trim(),
+      icon: category.icon,
+      color: category.color,
+      id:
+        typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `cat_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       user_id: userId,
       created_at: new Date().toISOString(),
     };
 
-    // Update Local Cache
     const cacheKey = `${LS_CATEGORIES}${userId}`;
-    const cached = await this.fetchCategories(userId);
+    const cached = readJson<Category[]>(cacheKey, []);
     const updated = [...cached, newCat];
-    localStorage.setItem(cacheKey, JSON.stringify(updated));
+    writeJson(cacheKey, updated);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(`${LS_CATEGORIES_SEEDED}${userId}`, '1');
+    }
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
         const { data, error } = await supabase
           .from('categories')
           .insert({
             user_id: userId,
-            name: category.name,
-            icon: category.icon,
-            color: category.color,
+            name: newCat.name,
+            icon: newCat.icon,
+            color: newCat.color,
           })
           .select()
           .single();
 
         if (!error && data) {
           const finalItem = data as Category;
-          const synced = updated.map((c) => (c.id === newCat.id ? finalItem : c));
-          localStorage.setItem(cacheKey, JSON.stringify(synced));
+          const latest = readJson<Category[]>(cacheKey, updated);
+          const synced = latest.map((c) => (c.id === newCat.id ? finalItem : c));
+          writeJson(cacheKey, synced);
           return finalItem;
         }
       } catch (err) {
@@ -238,26 +305,44 @@ class BudgetService {
     updates: Partial<Category>
   ): Promise<Category> {
     const cacheKey = `${LS_CATEGORIES}${userId}`;
-    const cached = await this.fetchCategories(userId);
+    const cached = readJson<Category[]>(cacheKey, []);
     const index = cached.findIndex((c) => c.id === id);
     if (index === -1) throw new Error('Category not found');
 
-    const updatedCat = { ...cached[index], ...updates };
-    cached[index] = updatedCat;
-    localStorage.setItem(cacheKey, JSON.stringify(cached));
+    const oldName = cached[index].name;
+    const cleanUpdates: Partial<Category> = {
+      ...updates,
+      ...(updates.name !== undefined ? { name: updates.name.trim() } : {}),
+    };
 
-    if (isSupabaseConfigured) {
+    const updatedCat: Category = { ...cached[index], ...cleanUpdates };
+    const nextList = cached.map((c) => (c.id === id ? updatedCat : c));
+    writeJson(cacheKey, nextList);
+
+    // If category was renamed, cascade-rename references in recurring expenses & planned purchases
+    const newName = updatedCat.name;
+    if (oldName && newName && oldName !== newName) {
+      await this.cascadeCategoryRename(userId, oldName, newName);
+    }
+
+    if (canUseSupabase(userId)) {
       try {
         const { data, error } = await supabase
           .from('categories')
-          .update(updates)
+          .update(cleanUpdates)
           .eq('id', id)
           .eq('user_id', userId)
           .select()
           .single();
 
         if (!error && data) {
-          return data as Category;
+          const serverCat = data as Category;
+          const latest = readJson<Category[]>(cacheKey, nextList);
+          writeJson(
+            cacheKey,
+            latest.map((c) => (c.id === id ? serverCat : c))
+          );
+          return serverCat;
         }
       } catch (err) {
         console.warn('Supabase update category failed:', err);
@@ -267,31 +352,88 @@ class BudgetService {
     return updatedCat;
   }
 
+  private async cascadeCategoryRename(
+    userId: string,
+    oldName: string,
+    newName: string
+  ): Promise<void> {
+    const oldNorm = oldName.trim().toLowerCase();
+
+    // Update local recurring cache
+    const recKey = `${LS_RECURRING}${userId}`;
+    const recList = readJson<RecurringExpense[]>(recKey, []);
+    let recChanged = false;
+    const nextRec = recList.map((r) => {
+      if (r.category.trim().toLowerCase() === oldNorm) {
+        recChanged = true;
+        return { ...r, category: newName };
+      }
+      return r;
+    });
+    if (recChanged) writeJson(recKey, nextRec);
+
+    // Update local planned cache
+    const plnKey = `${LS_PLANNED}${userId}`;
+    const plnList = readJson<PlannedPurchase[]>(plnKey, []);
+    let plnChanged = false;
+    const nextPln = plnList.map((p) => {
+      if (p.category.trim().toLowerCase() === oldNorm) {
+        plnChanged = true;
+        return { ...p, category: newName };
+      }
+      return p;
+    });
+    if (plnChanged) writeJson(plnKey, nextPln);
+
+    if (canUseSupabase(userId)) {
+      try {
+        await Promise.all([
+          supabase
+            .from('recurring_expenses')
+            .update({ category: newName })
+            .eq('user_id', userId)
+            .eq('category', oldName),
+          supabase
+            .from('planned_purchases')
+            .update({ category: newName })
+            .eq('user_id', userId)
+            .eq('category', oldName),
+        ]);
+      } catch (err) {
+        console.warn('Supabase cascade category rename failed:', err);
+      }
+    }
+  }
+
   async deleteCategory(userId: string, id: string): Promise<void> {
     const cacheKey = `${LS_CATEGORIES}${userId}`;
-    const cached = await this.fetchCategories(userId);
+    const cached = readJson<Category[]>(cacheKey, []);
     const filtered = cached.filter((c) => c.id !== id);
-    localStorage.setItem(cacheKey, JSON.stringify(filtered));
+    writeJson(cacheKey, filtered);
 
     // Clean up allocations from local budgets
-    try {
-      const budgetKeyPrefix = `${LS_BUDGETS}${userId}_`;
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && key.startsWith(budgetKeyPrefix)) {
-          const bStr = localStorage.getItem(key);
-          if (bStr) {
-            const b = JSON.parse(bStr);
-            if (b.allocations && b.allocations[id] !== undefined) {
-              delete b.allocations[id];
-              localStorage.setItem(key, JSON.stringify(b));
+    if (typeof window !== 'undefined') {
+      try {
+        const budgetKeyPrefix = `${LS_BUDGETS}${userId}_`;
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith(budgetKeyPrefix)) {
+            const bStr = localStorage.getItem(key);
+            if (bStr) {
+              const b = JSON.parse(bStr);
+              if (b.allocations && b.allocations[id] !== undefined) {
+                delete b.allocations[id];
+                localStorage.setItem(key, JSON.stringify(b));
+              }
             }
           }
         }
+      } catch {
+        // ignore storage cleanup errors
       }
-    } catch {}
+    }
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
         await supabase.from('categories').delete().eq('id', id).eq('user_id', userId);
       } catch (err) {
@@ -302,11 +444,40 @@ class BudgetService {
 
   // ================= MONTHLY BUDGETS =================
 
+  private findLatestKnownIncome(userId: string): number {
+    if (typeof window === 'undefined') return 0;
+    try {
+      const prefix = `${LS_BUDGETS}${userId}_`;
+      const found: { month: string; income: number }[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith(prefix)) {
+          const month = key.slice(prefix.length);
+          const raw = localStorage.getItem(key);
+          if (raw) {
+            const parsed = JSON.parse(raw) as MonthlyBudget;
+            const inc = Number(parsed.income) || 0;
+            if (inc > 0) {
+              found.push({ month, income: inc });
+            }
+          }
+        }
+      }
+      if (found.length > 0) {
+        found.sort((a, b) => b.month.localeCompare(a.month));
+        return found[0].income;
+      }
+    } catch {
+      // ignore
+    }
+    return 0;
+  }
+
   async fetchMonthlyBudget(userId: string, month: string): Promise<MonthlyBudget> {
     const cacheKey = `${LS_BUDGETS}${userId}_${month}`;
-    const cachedStr = localStorage.getItem(cacheKey);
+    let dbCheckedEmpty = false;
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
         const { data, error } = await supabase
           .from('monthly_budgets')
@@ -315,45 +486,45 @@ class BudgetService {
           .eq('month', month)
           .maybeSingle();
 
-        if (!error && data) {
-          const budget: MonthlyBudget = {
-            id: data.id,
-            user_id: data.user_id,
-            month: data.month,
-            income: Number(data.income) || 0,
-            allocations: data.allocations || {},
-            created_at: data.created_at,
-          };
-          localStorage.setItem(cacheKey, JSON.stringify(budget));
-          return budget;
+        if (!error) {
+          if (data) {
+            const budget: MonthlyBudget = {
+              id: data.id,
+              user_id: data.user_id,
+              month: data.month,
+              income: Number(data.income) || 0,
+              allocations: data.allocations || {},
+              created_at: data.created_at,
+            };
+            writeJson(cacheKey, budget);
+            return budget;
+          }
+          dbCheckedEmpty = true;
         }
       } catch (err) {
         console.warn('Supabase fetch budget failed:', err);
       }
     }
 
-    if (cachedStr) {
-      try {
-        return JSON.parse(cachedStr);
-      } catch {}
+    const cached = readJson<MonthlyBudget | null>(cacheKey, null);
+    if (cached && (!dbCheckedEmpty || cached.income > 0 || Object.keys(cached.allocations || {}).length > 0)) {
+      return {
+        ...cached,
+        income: Number(cached.income) || 0,
+        allocations: cached.allocations || {},
+      };
     }
 
-    // Default fallback starter budget with income 60,000
-    const categories = await this.fetchCategories(userId);
-    const initialAllocations: Record<string, number> = {};
-    categories.forEach((cat) => {
-      const starter = STARTER_CATEGORIES.find((s) => s.name === cat.name);
-      initialAllocations[cat.id] = starter ? starter.defaultAllocation : 0;
-    });
-
-    const fallback: MonthlyBudget = {
+    // For a fresh/unbudgeted month, carry forward latest known income (or 0) with clean empty allocations
+    // so TemplateBanner appears cleanly and active recurring bills drive initial category amounts.
+    const carriedIncome = this.findLatestKnownIncome(userId);
+    const fresh: MonthlyBudget = {
       user_id: userId,
       month,
-      income: 60000,
-      allocations: initialAllocations,
+      income: carriedIncome,
+      allocations: {},
     };
-    localStorage.setItem(cacheKey, JSON.stringify(fallback));
-    return fallback;
+    return fresh;
   }
 
   async upsertMonthlyBudget(
@@ -363,16 +534,22 @@ class BudgetService {
     allocations: Record<string, number>
   ): Promise<MonthlyBudget> {
     const cacheKey = `${LS_BUDGETS}${userId}_${month}`;
+    const safeIncome = Math.max(0, Number(income) || 0);
+    const safeAllocations: Record<string, number> = {};
+    Object.entries(allocations || {}).forEach(([k, v]) => {
+      safeAllocations[k] = Math.max(0, Number(v) || 0);
+    });
+
     const budgetObj: MonthlyBudget = {
       user_id: userId,
       month,
-      income,
-      allocations,
+      income: safeIncome,
+      allocations: safeAllocations,
       created_at: new Date().toISOString(),
     };
-    localStorage.setItem(cacheKey, JSON.stringify(budgetObj));
+    writeJson(cacheKey, budgetObj);
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
         const { data, error } = await supabase
           .from('monthly_budgets')
@@ -380,8 +557,8 @@ class BudgetService {
             {
               user_id: userId,
               month,
-              income,
-              allocations,
+              income: safeIncome,
+              allocations: safeAllocations,
             },
             { onConflict: 'user_id,month' }
           )
@@ -397,7 +574,7 @@ class BudgetService {
             allocations: data.allocations || {},
             created_at: data.created_at,
           };
-          localStorage.setItem(cacheKey, JSON.stringify(synced));
+          writeJson(cacheKey, synced);
           return synced;
         }
       } catch (err) {
@@ -412,9 +589,10 @@ class BudgetService {
 
   async fetchRecurring(userId: string): Promise<RecurringExpense[]> {
     const cacheKey = `${LS_RECURRING}${userId}`;
-    const cachedStr = localStorage.getItem(cacheKey);
+    const seededKey = `${LS_RECURRING_SEEDED}${userId}`;
+    const alreadySeeded = typeof window !== 'undefined' && localStorage.getItem(seededKey) === '1';
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
         const { data, error } = await supabase
           .from('recurring_expenses')
@@ -423,8 +601,9 @@ class BudgetService {
           .order('day_of_month', { ascending: true });
 
         if (!error && data) {
-          const list = data as RecurringExpense[];
-          localStorage.setItem(cacheKey, JSON.stringify(list));
+          const list = (data as RecurringExpense[]).map(normalizeRecurring);
+          writeJson(cacheKey, list);
+          if (typeof window !== 'undefined') localStorage.setItem(seededKey, '1');
           return list;
         }
       } catch (err) {
@@ -432,13 +611,19 @@ class BudgetService {
       }
     }
 
-    if (cachedStr) {
-      try {
-        return JSON.parse(cachedStr);
-      } catch {}
+    const cached = readJson<RecurringExpense[] | null>(cacheKey, null);
+    if (Array.isArray(cached)) {
+      if (cached.length > 0 && typeof window !== 'undefined') {
+        localStorage.setItem(seededKey, '1');
+      }
+      return cached.map(normalizeRecurring);
     }
 
-    // Default starter recurring expenses
+    if (alreadySeeded) {
+      return [];
+    }
+
+    // Default starter recurring expenses for first-time local/demo visitors only
     const starters: RecurringExpense[] = [
       {
         id: 'rec_1',
@@ -471,7 +656,8 @@ class BudgetService {
         created_at: new Date().toISOString(),
       },
     ];
-    localStorage.setItem(cacheKey, JSON.stringify(starters));
+    writeJson(cacheKey, starters);
+    if (typeof window !== 'undefined') localStorage.setItem(seededKey, '1');
     return starters;
   }
 
@@ -485,37 +671,51 @@ class BudgetService {
       active: boolean;
     }
   ): Promise<RecurringExpense> {
-    const newItem: RecurringExpense = {
-      ...item,
-      id: `rec_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    const newItem: RecurringExpense = normalizeRecurring({
+      name: item.name.trim(),
+      amount: Number(item.amount) || 0,
+      category: item.category,
+      day_of_month: Math.max(1, Math.min(31, Number(item.day_of_month) || 1)),
+      active: item.active,
+      id:
+        typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `rec_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       user_id: userId,
       created_at: new Date().toISOString(),
-    };
+    });
 
     const cacheKey = `${LS_RECURRING}${userId}`;
-    const current = await this.fetchRecurring(userId);
+    const current = readJson<RecurringExpense[]>(cacheKey, []);
     const updated = [...current, newItem].sort((a, b) => a.day_of_month - b.day_of_month);
-    localStorage.setItem(cacheKey, JSON.stringify(updated));
+    writeJson(cacheKey, updated);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(`${LS_RECURRING_SEEDED}${userId}`, '1');
+    }
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
         const { data, error } = await supabase
           .from('recurring_expenses')
           .insert({
             user_id: userId,
-            name: item.name,
-            amount: item.amount,
-            category: item.category,
-            day_of_month: item.day_of_month,
-            active: item.active,
+            name: newItem.name,
+            amount: newItem.amount,
+            category: newItem.category,
+            day_of_month: newItem.day_of_month,
+            active: newItem.active,
           })
           .select()
           .single();
 
         if (!error && data) {
-          const synced = updated.map((r) => (r.id === newItem.id ? (data as RecurringExpense) : r));
-          localStorage.setItem(cacheKey, JSON.stringify(synced));
-          return data as RecurringExpense;
+          const syncedItem = normalizeRecurring(data as RecurringExpense);
+          const latest = readJson<RecurringExpense[]>(cacheKey, updated);
+          const syncedList = latest
+            .map((r) => (r.id === newItem.id ? syncedItem : r))
+            .sort((a, b) => a.day_of_month - b.day_of_month);
+          writeJson(cacheKey, syncedList);
+          return syncedItem;
         }
       } catch (err) {
         console.warn('Supabase add recurring failed:', err);
@@ -528,30 +728,52 @@ class BudgetService {
   async updateRecurring(
     userId: string,
     id: string,
-    updates: Partial<RecurringExpense>
+    updates: Partial<RecurringExpense>,
+    fallbackItem?: RecurringExpense
   ): Promise<RecurringExpense> {
     const cacheKey = `${LS_RECURRING}${userId}`;
-    const current = await this.fetchRecurring(userId);
+    const current = readJson<RecurringExpense[]>(cacheKey, []);
     const idx = current.findIndex((r) => r.id === id);
-    if (idx === -1) throw new Error('Recurring item not found');
+    const existing = idx !== -1 ? current[idx] : fallbackItem;
+    if (!existing) throw new Error('Recurring item not found');
 
-    const updated = { ...current[idx], ...updates };
-    current[idx] = updated;
-    current.sort((a, b) => a.day_of_month - b.day_of_month);
-    localStorage.setItem(cacheKey, JSON.stringify(current));
+    const cleanUpdates: Partial<RecurringExpense> = {
+      ...updates,
+      ...(updates.name !== undefined ? { name: updates.name.trim() } : {}),
+      ...(updates.amount !== undefined ? { amount: Math.max(0, Number(updates.amount) || 0) } : {}),
+      ...(updates.day_of_month !== undefined
+        ? { day_of_month: Math.max(1, Math.min(31, Number(updates.day_of_month) || 1)) }
+        : {}),
+    };
 
-    if (isSupabaseConfigured) {
+    const updated = normalizeRecurring({ ...existing, ...cleanUpdates });
+    const nextList =
+      idx !== -1
+        ? current.map((r) => (r.id === id ? updated : r))
+        : [...current, updated];
+    nextList.sort((a, b) => a.day_of_month - b.day_of_month);
+    writeJson(cacheKey, nextList);
+
+    if (canUseSupabase(userId)) {
       try {
         const { data, error } = await supabase
           .from('recurring_expenses')
-          .update(updates)
+          .update(cleanUpdates)
           .eq('id', id)
           .eq('user_id', userId)
           .select()
           .single();
 
         if (!error && data) {
-          return data as RecurringExpense;
+          const syncedItem = normalizeRecurring(data as RecurringExpense);
+          const latest = readJson<RecurringExpense[]>(cacheKey, nextList);
+          writeJson(
+            cacheKey,
+            latest
+              .map((r) => (r.id === id ? syncedItem : r))
+              .sort((a, b) => a.day_of_month - b.day_of_month)
+          );
+          return syncedItem;
         }
       } catch (err) {
         console.warn('Supabase update recurring failed:', err);
@@ -563,11 +785,11 @@ class BudgetService {
 
   async deleteRecurring(userId: string, id: string): Promise<void> {
     const cacheKey = `${LS_RECURRING}${userId}`;
-    const current = await this.fetchRecurring(userId);
+    const current = readJson<RecurringExpense[]>(cacheKey, []);
     const filtered = current.filter((r) => r.id !== id);
-    localStorage.setItem(cacheKey, JSON.stringify(filtered));
+    writeJson(cacheKey, filtered);
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
         await supabase.from('recurring_expenses').delete().eq('id', id).eq('user_id', userId);
       } catch (err) {
@@ -576,40 +798,42 @@ class BudgetService {
     }
   }
 
-  async toggleRecurring(userId: string, id: string, active: boolean): Promise<RecurringExpense> {
-    return this.updateRecurring(userId, id, { active });
+  async toggleRecurring(
+    userId: string,
+    id: string,
+    active: boolean,
+    fallbackItem?: RecurringExpense
+  ): Promise<RecurringExpense> {
+    return this.updateRecurring(userId, id, { active }, fallbackItem);
   }
 
   // ================= PLANNED PURCHASES =================
 
   async fetchPlanned(userId: string, month?: string): Promise<PlannedPurchase[]> {
     const cacheKey = `${LS_PLANNED}${userId}`;
-    const cachedStr = localStorage.getItem(cacheKey);
-
+    let loadedFromDb = false;
     let all: PlannedPurchase[] = [];
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
-        const query = supabase
+        const { data, error } = await supabase
           .from('planned_purchases')
           .select('*')
           .eq('user_id', userId)
           .order('created_at', { ascending: false });
 
-        const { data, error } = await query;
         if (!error && data) {
-          all = data as PlannedPurchase[];
-          localStorage.setItem(cacheKey, JSON.stringify(all));
+          all = (data as PlannedPurchase[]).map(normalizePlanned);
+          writeJson(cacheKey, all);
+          loadedFromDb = true;
         }
       } catch (err) {
         console.warn('Supabase fetch planned failed:', err);
       }
     }
 
-    if (all.length === 0 && cachedStr) {
-      try {
-        all = JSON.parse(cachedStr);
-      } catch {}
+    if (!loadedFromDb) {
+      all = readJson<PlannedPurchase[]>(cacheKey, []).map(normalizePlanned);
     }
 
     if (month) {
@@ -629,38 +853,50 @@ class BudgetService {
       notes?: string | null;
     }
   ): Promise<PlannedPurchase> {
-    const newItem: PlannedPurchase = {
-      ...item,
-      id: `pln_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    const newItem: PlannedPurchase = normalizePlanned({
+      name: item.name.trim(),
+      amount: Number(item.amount) || 0,
+      category: item.category,
+      target_month: item.target_month,
+      status: item.status || 'planned',
+      notes: item.notes?.trim() || null,
+      id:
+        typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `pln_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       user_id: userId,
       created_at: new Date().toISOString(),
-    };
+    });
 
     const cacheKey = `${LS_PLANNED}${userId}`;
-    const all = await this.fetchPlanned(userId);
+    const all = readJson<PlannedPurchase[]>(cacheKey, []);
     const updated = [newItem, ...all];
-    localStorage.setItem(cacheKey, JSON.stringify(updated));
+    writeJson(cacheKey, updated);
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
         const { data, error } = await supabase
           .from('planned_purchases')
           .insert({
             user_id: userId,
-            name: item.name,
-            amount: item.amount,
-            target_month: item.target_month,
-            status: item.status,
-            category: item.category,
-            notes: item.notes,
+            name: newItem.name,
+            amount: newItem.amount,
+            target_month: newItem.target_month,
+            status: newItem.status,
+            category: newItem.category,
+            notes: newItem.notes,
           })
           .select()
           .single();
 
         if (!error && data) {
-          const synced = updated.map((p) => (p.id === newItem.id ? (data as PlannedPurchase) : p));
-          localStorage.setItem(cacheKey, JSON.stringify(synced));
-          return data as PlannedPurchase;
+          const syncedItem = normalizePlanned(data as PlannedPurchase);
+          const latest = readJson<PlannedPurchase[]>(cacheKey, updated);
+          writeJson(
+            cacheKey,
+            latest.map((p) => (p.id === newItem.id ? syncedItem : p))
+          );
+          return syncedItem;
         }
       } catch (err) {
         console.warn('Supabase add planned failed:', err);
@@ -673,29 +909,44 @@ class BudgetService {
   async updatePlanned(
     userId: string,
     id: string,
-    updates: Partial<PlannedPurchase>
+    updates: Partial<PlannedPurchase>,
+    fallbackItem?: PlannedPurchase
   ): Promise<PlannedPurchase> {
     const cacheKey = `${LS_PLANNED}${userId}`;
-    const all = await this.fetchPlanned(userId);
+    const all = readJson<PlannedPurchase[]>(cacheKey, []);
     const idx = all.findIndex((p) => p.id === id);
-    if (idx === -1) throw new Error('Planned item not found');
+    const existing = idx !== -1 ? all[idx] : fallbackItem;
+    if (!existing) throw new Error('Planned item not found');
 
-    const updated = { ...all[idx], ...updates };
-    all[idx] = updated;
-    localStorage.setItem(cacheKey, JSON.stringify(all));
+    const cleanUpdates: Partial<PlannedPurchase> = {
+      ...updates,
+      ...(updates.name !== undefined ? { name: updates.name.trim() } : {}),
+      ...(updates.amount !== undefined ? { amount: Math.max(0, Number(updates.amount) || 0) } : {}),
+    };
 
-    if (isSupabaseConfigured) {
+    const updated = normalizePlanned({ ...existing, ...cleanUpdates });
+    const nextList =
+      idx !== -1 ? all.map((p) => (p.id === id ? updated : p)) : [updated, ...all];
+    writeJson(cacheKey, nextList);
+
+    if (canUseSupabase(userId)) {
       try {
         const { data, error } = await supabase
           .from('planned_purchases')
-          .update(updates)
+          .update(cleanUpdates)
           .eq('id', id)
           .eq('user_id', userId)
           .select()
           .single();
 
         if (!error && data) {
-          return data as PlannedPurchase;
+          const syncedItem = normalizePlanned(data as PlannedPurchase);
+          const latest = readJson<PlannedPurchase[]>(cacheKey, nextList);
+          writeJson(
+            cacheKey,
+            latest.map((p) => (p.id === id ? syncedItem : p))
+          );
+          return syncedItem;
         }
       } catch (err) {
         console.warn('Supabase update planned failed:', err);
@@ -707,11 +958,11 @@ class BudgetService {
 
   async deletePlanned(userId: string, id: string): Promise<void> {
     const cacheKey = `${LS_PLANNED}${userId}`;
-    const all = await this.fetchPlanned(userId);
+    const all = readJson<PlannedPurchase[]>(cacheKey, []);
     const filtered = all.filter((p) => p.id !== id);
-    localStorage.setItem(cacheKey, JSON.stringify(filtered));
+    writeJson(cacheKey, filtered);
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
         await supabase.from('planned_purchases').delete().eq('id', id).eq('user_id', userId);
       } catch (err) {
@@ -720,17 +971,21 @@ class BudgetService {
     }
   }
 
-  async markPlannedBought(userId: string, id: string): Promise<PlannedPurchase> {
-    return this.updatePlanned(userId, id, { status: 'bought' });
+  async markPlannedBought(
+    userId: string,
+    id: string,
+    status: PlannedPurchaseStatus = 'bought',
+    fallbackItem?: PlannedPurchase
+  ): Promise<PlannedPurchase> {
+    return this.updatePlanned(userId, id, { status }, fallbackItem);
   }
 
   // ================= TEMPLATES =================
 
   async fetchTemplates(userId: string): Promise<BudgetTemplate[]> {
     const cacheKey = `${LS_TEMPLATES}${userId}`;
-    const cachedStr = localStorage.getItem(cacheKey);
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
         const { data, error } = await supabase
           .from('budget_templates')
@@ -740,7 +995,7 @@ class BudgetService {
           .order('created_at', { ascending: false });
 
         if (!error && data) {
-          localStorage.setItem(cacheKey, JSON.stringify(data));
+          writeJson(cacheKey, data);
           return data as BudgetTemplate[];
         }
       } catch (err) {
@@ -748,14 +1003,7 @@ class BudgetService {
       }
     }
 
-    if (cachedStr) {
-      try {
-        const parsed = JSON.parse(cachedStr);
-        if (Array.isArray(parsed)) return parsed;
-      } catch {}
-    }
-
-    return [];
+    return readJson<BudgetTemplate[]>(cacheKey, []);
   }
 
   async saveAsTemplate(
@@ -767,7 +1015,6 @@ class BudgetService {
     const cacheKey = `${LS_TEMPLATES}${userId}`;
     const cleanName = name.trim();
 
-    // Clean allocations (only positive numbers)
     const cleanAllocations: Record<string, number> = {};
     Object.entries(allocations).forEach(([k, v]) => {
       const num = Number(v) || 0;
@@ -777,7 +1024,10 @@ class BudgetService {
     });
 
     const newTemplate: BudgetTemplate = {
-      id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `tpl_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      id:
+        typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `tpl_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       user_id: userId,
       name: cleanName,
       allocations: cleanAllocations,
@@ -785,10 +1035,9 @@ class BudgetService {
       created_at: new Date().toISOString(),
     };
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
         if (isDefault) {
-          // Unset other defaults first
           await supabase
             .from('budget_templates')
             .update({ is_default: false })
@@ -809,7 +1058,7 @@ class BudgetService {
 
         if (!error && data) {
           const all = await this.fetchTemplates(userId);
-          localStorage.setItem(cacheKey, JSON.stringify(all));
+          writeJson(cacheKey, all);
           return data as BudgetTemplate;
         }
       } catch (err) {
@@ -817,13 +1066,12 @@ class BudgetService {
       }
     }
 
-    // Local fallback
-    const cached = await this.fetchTemplates(userId);
+    const cached = readJson<BudgetTemplate[]>(cacheKey, []);
     let updatedList = isDefault
       ? cached.map((t) => ({ ...t, is_default: false }))
       : [...cached];
     updatedList = [newTemplate, ...updatedList];
-    localStorage.setItem(cacheKey, JSON.stringify(updatedList));
+    writeJson(cacheKey, updatedList);
     return newTemplate;
   }
 
@@ -840,7 +1088,6 @@ class BudgetService {
       throw new Error('Template not found');
     }
 
-    // Get categories to validate
     const categories = existingCategories || (await this.fetchCategories(userId));
     const validCategoryIds = new Set(categories.map((c) => c.id));
 
@@ -855,7 +1102,6 @@ class BudgetService {
       }
     });
 
-    // Keep the current month's income
     const currentBudget = await this.fetchMonthlyBudget(userId, targetMonth);
     const updatedBudget = await this.upsertMonthlyBudget(
       userId,
@@ -877,7 +1123,7 @@ class BudgetService {
     updates: Partial<Pick<BudgetTemplate, 'name' | 'allocations' | 'is_default'>>
   ): Promise<BudgetTemplate> {
     const cacheKey = `${LS_TEMPLATES}${userId}`;
-    const cached = await this.fetchTemplates(userId);
+    const cached = readJson<BudgetTemplate[]>(cacheKey, []);
     const existing = cached.find((t) => t.id === id);
 
     if (!existing) {
@@ -890,10 +1136,9 @@ class BudgetService {
       name: updates.name ? updates.name.trim() : existing.name,
     };
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
         if (updates.is_default) {
-          // Unset other defaults
           await supabase
             .from('budget_templates')
             .update({ is_default: false })
@@ -914,7 +1159,7 @@ class BudgetService {
 
         if (!error && data) {
           const all = await this.fetchTemplates(userId);
-          localStorage.setItem(cacheKey, JSON.stringify(all));
+          writeJson(cacheKey, all);
           return data as BudgetTemplate;
         }
       } catch (err) {
@@ -922,23 +1167,22 @@ class BudgetService {
       }
     }
 
-    // Local fallback
-    let list = cached.map((t) => {
+    const list = cached.map((t) => {
       if (t.id === id) return updated;
       if (updates.is_default) return { ...t, is_default: false };
       return t;
     });
-    localStorage.setItem(cacheKey, JSON.stringify(list));
+    writeJson(cacheKey, list);
     return updated;
   }
 
   async deleteTemplate(userId: string, id: string): Promise<void> {
     const cacheKey = `${LS_TEMPLATES}${userId}`;
-    const cached = await this.fetchTemplates(userId);
+    const cached = readJson<BudgetTemplate[]>(cacheKey, []);
     const updated = cached.filter((t) => t.id !== id);
-    localStorage.setItem(cacheKey, JSON.stringify(updated));
+    writeJson(cacheKey, updated);
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
         await supabase
           .from('budget_templates')
@@ -953,15 +1197,15 @@ class BudgetService {
 
   async setDefaultTemplate(userId: string, id: string): Promise<void> {
     const cacheKey = `${LS_TEMPLATES}${userId}`;
-    const cached = await this.fetchTemplates(userId);
+    const cached = readJson<BudgetTemplate[]>(cacheKey, []);
 
     const updated = cached.map((t) => ({
       ...t,
       is_default: t.id === id,
     }));
-    localStorage.setItem(cacheKey, JSON.stringify(updated));
+    writeJson(cacheKey, updated);
 
-    if (isSupabaseConfigured) {
+    if (canUseSupabase(userId)) {
       try {
         await supabase
           .from('budget_templates')
@@ -996,30 +1240,19 @@ class BudgetService {
     ]);
 
     const income = Number(budget.income) || 0;
-    const allocations = budget.allocations || {};
+    const breakdown = computeBudgetPlanBreakdown(
+      categories,
+      budget.allocations || {},
+      recurring,
+      planned
+    );
 
-    // Sum allocations for existing categories
-    let totalAllocated = 0;
-    let savingsAllocated = 0;
-
-    categories.forEach((cat) => {
-      const amt = Number(allocations[cat.id]) || 0;
-      totalAllocated += amt;
-      if (
-        cat.icon === 'PiggyBank' ||
-        cat.name.toLowerCase().includes('saving') ||
-        cat.name.toLowerCase().includes('invest')
-      ) {
-        savingsAllocated += amt;
-      }
-    });
-
+    const totalAllocated = breakdown.totalAllocated;
     const unallocated = income - totalAllocated;
-    const savingsPercent = income > 0 ? Math.round((savingsAllocated / income) * 100) : 0;
+    const savingsPercent =
+      income > 0 ? Math.round((breakdown.savingsAllocated / income) * 100) : 0;
 
     const activeRecurring = recurring.filter((r) => r.active);
-    const recurringTotal = activeRecurring.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
-
     const pendingPlanned = planned.filter((p) => p.status === 'planned');
 
     return {
@@ -1030,7 +1263,7 @@ class BudgetService {
       savingsPercent,
       categoriesCount: categories.length,
       recurringCount: activeRecurring.length,
-      recurringTotal,
+      recurringTotal: breakdown.totalRecurring,
       plannedCount: pendingPlanned.length,
     };
   }

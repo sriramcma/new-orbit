@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { X } from 'lucide-react';
 import { Category, RecurringExpense } from '../../types/budget';
 
@@ -26,29 +26,55 @@ export const RecurringFormModal: React.FC<RecurringFormModalProps> = ({
   const [name, setName] = useState('');
   const [amount, setAmount] = useState('');
   const [category, setCategory] = useState('');
-  const [dayOfMonth, setDayOfMonth] = useState<number>(1);
+  const [dayOfMonth, setDayOfMonth] = useState<string>('5');
   const [active, setActive] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Preserve legacy/unmatched category name if editing an item whose category was deleted
+  const hasLegacyCategory = useMemo(() => {
+    if (!editingItem?.category) return false;
+    const norm = editingItem.category.trim().toLowerCase();
+    return !categories.some((c) => c.name.trim().toLowerCase() === norm);
+  }, [editingItem, categories]);
 
   useEffect(() => {
     if (editingItem) {
       setName(editingItem.name);
       setAmount(editingItem.amount.toString());
       setCategory(editingItem.category);
-      setDayOfMonth(editingItem.day_of_month || 1);
+      setDayOfMonth(String(editingItem.day_of_month || 1));
       setActive(editingItem.active !== undefined ? editingItem.active : true);
     } else {
       setName('');
       setAmount('');
       setCategory(categories[0]?.name || 'General');
-      setDayOfMonth(5);
+      setDayOfMonth('5');
       setActive(true);
     }
     setError(null);
   }, [editingItem, isOpen, categories]);
 
   if (!isOpen) return null;
+
+  const parseDay = (raw: string): number => {
+    const parsed = parseInt(raw, 10);
+    if (isNaN(parsed)) return 1;
+    return Math.max(1, Math.min(31, parsed));
+  };
+
+  const handleDayChange = (raw: string) => {
+    const digitsOnly = raw.replace(/\D/g, '').slice(0, 2);
+    setDayOfMonth(digitsOnly);
+  };
+
+  const handleDayBlur = () => {
+    if (!dayOfMonth) {
+      setDayOfMonth('1');
+      return;
+    }
+    setDayOfMonth(String(parseDay(dayOfMonth)));
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -64,6 +90,9 @@ export const RecurringFormModal: React.FC<RecurringFormModalProps> = ({
       return;
     }
 
+    const clampedDay = parseDay(dayOfMonth);
+    setDayOfMonth(String(clampedDay));
+
     setSubmitting(true);
     setError(null);
     try {
@@ -71,7 +100,7 @@ export const RecurringFormModal: React.FC<RecurringFormModalProps> = ({
         name: cleanName,
         amount: numAmount,
         category: category || (categories[0]?.name ?? 'General'),
-        day_of_month: Number(dayOfMonth),
+        day_of_month: clampedDay,
         active,
       });
       onClose();
@@ -83,7 +112,12 @@ export const RecurringFormModal: React.FC<RecurringFormModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200">
+    <div
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !submitting) onClose();
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200"
+    >
       <div className="w-full max-w-md bg-white dark:bg-[#1e293b] rounded-2xl shadow-2xl border border-[#e5e7eb] dark:border-[#334155] overflow-hidden max-h-[90vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#e5e7eb] dark:border-[#334155] shrink-0">
@@ -154,12 +188,17 @@ export const RecurringFormModal: React.FC<RecurringFormModalProps> = ({
               onChange={(e) => setCategory(e.target.value)}
               className="w-full px-3 py-2 text-sm rounded-xl bg-gray-50 dark:bg-slate-900 border border-[#e5e7eb] dark:border-[#334155] text-[#111827] dark:text-[#f1f5f9] focus:outline-hidden focus:ring-2 focus:ring-[#6366f1]"
             >
+              {hasLegacyCategory && editingItem && (
+                <option value={editingItem.category}>{editingItem.category}</option>
+              )}
               {categories.map((c) => (
                 <option key={c.id} value={c.name}>
                   {c.name}
                 </option>
               ))}
-              {categories.length === 0 && <option value="General">General</option>}
+              {categories.length === 0 && !hasLegacyCategory && (
+                <option value="General">General</option>
+              )}
             </select>
           </div>
 
@@ -169,11 +208,12 @@ export const RecurringFormModal: React.FC<RecurringFormModalProps> = ({
               Day of Month (1 - 31)
             </label>
             <input
-              type="number"
-              min={1}
-              max={31}
+              type="text"
+              inputMode="numeric"
+              placeholder="1 - 31"
               value={dayOfMonth}
-              onChange={(e) => setDayOfMonth(Math.max(1, Math.min(31, parseInt(e.target.value) || 1)))}
+              onChange={(e) => handleDayChange(e.target.value)}
+              onBlur={handleDayBlur}
               className="w-full px-3 py-2 text-sm rounded-xl bg-gray-50 dark:bg-slate-900 border border-[#e5e7eb] dark:border-[#334155] text-[#111827] dark:text-[#f1f5f9] focus:outline-hidden focus:ring-2 focus:ring-[#6366f1]"
             />
           </div>
@@ -185,7 +225,7 @@ export const RecurringFormModal: React.FC<RecurringFormModalProps> = ({
                 Active Expense
               </span>
               <span className="text-[11px] text-[#6b7280] dark:text-[#94a3b8]">
-                Include this in monthly recurring totals
+                Auto-include in monthly Plan & recurring totals
               </span>
             </div>
             <button
@@ -193,7 +233,7 @@ export const RecurringFormModal: React.FC<RecurringFormModalProps> = ({
               role="switch"
               aria-checked={active}
               onClick={() => setActive(!active)}
-              className={`w-10 h-6 flex items-center rounded-full p-0.5 transition-colors cursor-pointer ${
+              className={`w-10 h-6 flex items-center rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${
                 active ? 'bg-[#6366f1]' : 'bg-gray-300 dark:bg-slate-700'
               }`}
             >

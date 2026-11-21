@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Pencil, Check, X, AlertTriangle, CheckCircle2, TrendingUp, Sparkles } from 'lucide-react';
+import { Pencil, Check, X, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { formatIndianCurrency, formatMonthLabel } from '../../utils/budgetUtils';
 
 interface BudgetHeroProps {
@@ -35,7 +35,7 @@ export const BudgetHero: React.FC<BudgetHeroProps> = ({
   const handleSaveIncome = async () => {
     const parsed = parseFloat(incomeInput.replace(/,/g, ''));
     if (isNaN(parsed) || parsed < 0) {
-      setIncomeInput(income.toString());
+      setIncomeInput(income > 0 ? income.toString() : '');
       setIsEditingIncome(false);
       return;
     }
@@ -58,7 +58,7 @@ export const BudgetHero: React.FC<BudgetHeroProps> = ({
     if (e.key === 'Enter') {
       handleSaveIncome();
     } else if (e.key === 'Escape') {
-      setIncomeInput(income.toString());
+      setIncomeInput(income > 0 ? income.toString() : '');
       setIsEditingIncome(false);
     }
   };
@@ -85,27 +85,24 @@ export const BudgetHero: React.FC<BudgetHeroProps> = ({
           </div>
 
           <div className="text-right shrink-0 max-w-full">
-            {unallocated > 0 && (
+            {income === 0 ? (
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-lg bg-indigo-500/20 text-indigo-200 border border-indigo-400/30">
+                Tap income to plan
+              </span>
+            ) : unallocated > 0 ? (
               <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-lg bg-amber-500/15 text-amber-300 border border-amber-500/30 max-w-full">
                 <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                 <span className="truncate">₹{formatIndianCurrency(unallocated)} left to allocate</span>
               </span>
-            )}
-            {unallocated < 0 && (
+            ) : unallocated < 0 ? (
               <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-lg bg-rose-500/15 text-rose-300 border border-rose-500/30 max-w-full">
                 <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                 <span className="truncate">Over-allocated by ₹{formatIndianCurrency(Math.abs(unallocated))}</span>
               </span>
-            )}
-            {unallocated === 0 && income > 0 && (
+            ) : (
               <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                 Balanced ✓
-              </span>
-            )}
-            {income === 0 && (
-              <span className="text-xs text-indigo-300/70">
-                Tap income to plan
               </span>
             )}
           </div>

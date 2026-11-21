@@ -1,3 +1,5 @@
+import { Category, CategoryAllocations, PlannedPurchase, RecurringExpense } from '../types/budget';
+
 export const CATEGORY_ICON_NAMES = [
   'PiggyBank',
   'Zap',
@@ -34,7 +36,7 @@ export function getColorClasses(colorName?: string) {
 export function formatIndianCurrency(val: number): string {
   return new Intl.NumberFormat('en-IN', {
     maximumFractionDigits: 0,
-  }).format(val || 0);
+  }).format(Number.isFinite(val) ? val : 0);
 }
 
 export function getCurrentMonthString(): string {
@@ -49,6 +51,7 @@ export function formatMonthLabel(monthStr: string): string {
   const [yearStr, monthNum] = monthStr.split('-');
   const y = parseInt(yearStr, 10);
   const m = parseInt(monthNum, 10) - 1;
+  if (Number.isNaN(y) || Number.isNaN(m)) return monthStr;
   const d = new Date(y, m, 1);
   return d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 }
@@ -58,6 +61,7 @@ export function formatShortMonth(monthStr: string): string {
   const [yearStr, monthNum] = monthStr.split('-');
   const y = parseInt(yearStr, 10);
   const m = parseInt(monthNum, 10) - 1;
+  if (Number.isNaN(y) || Number.isNaN(m)) return monthStr;
   const d = new Date(y, m, 1);
   return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
 }
@@ -130,4 +134,149 @@ export function formatDayOfMonth(day: number): string {
     return `${day}rd`;
   }
   return `${day}th`;
+}
+
+/**
+ * Matches a recurring/planned item's category field (ID or Name) against a Category object.
+ */
+export function matchesBudgetCategory(itemCategory: string | undefined | null, cat: Category): boolean {
+  if (!itemCategory) return false;
+  if (itemCategory === cat.id) return true;
+  return itemCategory.trim().toLowerCase() === cat.name.trim().toLowerCase();
+}
+
+export interface CategoryBudgetBreakdown {
+  categoryId: string;
+  manualAmount: number;
+  recurringTotal: number;
+  recurringCount: number;
+  plannedTotal: number;
+  plannedCount: number;
+  committedTotal: number;
+  effectiveAmount: number;
+  extraAmount: number;
+}
+
+export interface BudgetPlanBreakdown {
+  byCategoryId: Record<string, CategoryBudgetBreakdown>;
+  effectiveAllocations: CategoryAllocations;
+  totalAllocated: number;
+  totalRecurring: number;
+  totalPlannedThisMonth: number;
+  unmatchedRecurringTotal: number;
+  unmatchedPlannedTotal: number;
+  savingsAllocated: number;
+}
+
+/**
+ * Single source of truth for combining manual category allocations with active Recurring Expenses
+ * and this month's Planned Purchases without double counting.
+ *
+ * For each category:
+ *   committedTotal = activeRecurringInCategory + activePlannedThisMonthInCategory
+ *   effectiveAmount = Math.max(manualAllocation, committedTotal)
+ */
+export function computeBudgetPlanBreakdown(
+  categories: Category[],
+  manualAllocations: CategoryAllocations,
+  recurringExpenses: RecurringExpense[],
+  thisMonthPlanned: PlannedPurchase[]
+): BudgetPlanBreakdown {
+  const byCategoryId: Record<string, CategoryBudgetBreakdown> = {};
+  const effectiveAllocations: CategoryAllocations = {};
+
+  const activeRecurring = recurringExpenses.filter((r) => r.active);
+  const activePlanned = thisMonthPlanned.filter((p) => p.status !== 'cancelled');
+
+  const matchedRecurringIds = new Set<string>();
+  const matchedPlannedIds = new Set<string>();
+
+  let totalAllocated = 0;
+  let savingsAllocated = 0;
+
+  for (const cat of categories) {
+    let recurringTotal = 0;
+    let recurringCount = 0;
+    for (const r of activeRecurring) {
+      if (matchesBudgetCategory(r.category, cat)) {
+        recurringTotal += Math.max(0, Number(r.amount) || 0);
+        recurringCount += 1;
+        matchedRecurringIds.add(r.id);
+      }
+    }
+
+    let plannedTotal = 0;
+    let plannedCount = 0;
+    for (const p of activePlanned) {
+      if (matchesBudgetCategory(p.category, cat)) {
+        plannedTotal += Math.max(0, Number(p.amount) || 0);
+        plannedCount += 1;
+        matchedPlannedIds.add(p.id);
+      }
+    }
+
+    const committedTotal = recurringTotal + plannedTotal;
+    const manualAmount = Math.max(0, Number(manualAllocations?.[cat.id]) || 0);
+    const effectiveAmount = Math.max(manualAmount, committedTotal);
+    const extraAmount = Math.max(0, effectiveAmount - committedTotal);
+
+    byCategoryId[cat.id] = {
+      categoryId: cat.id,
+      manualAmount,
+      recurringTotal,
+      recurringCount,
+      plannedTotal,
+      plannedCount,
+      committedTotal,
+      effectiveAmount,
+      extraAmount,
+    };
+
+    effectiveAllocations[cat.id] = effectiveAmount;
+    totalAllocated += effectiveAmount;
+
+    if (
+      cat.icon === 'PiggyBank' ||
+      cat.name.toLowerCase().includes('saving') ||
+      cat.name.toLowerCase().includes('invest')
+    ) {
+      savingsAllocated += effectiveAmount;
+    }
+  }
+
+  let unmatchedRecurringTotal = 0;
+  for (const r of activeRecurring) {
+    if (!matchedRecurringIds.has(r.id)) {
+      unmatchedRecurringTotal += Math.max(0, Number(r.amount) || 0);
+    }
+  }
+
+  let unmatchedPlannedTotal = 0;
+  for (const p of activePlanned) {
+    if (!matchedPlannedIds.has(p.id)) {
+      unmatchedPlannedTotal += Math.max(0, Number(p.amount) || 0);
+    }
+  }
+
+  totalAllocated += unmatchedRecurringTotal + unmatchedPlannedTotal;
+
+  const totalRecurring = activeRecurring.reduce(
+    (sum, r) => sum + Math.max(0, Number(r.amount) || 0),
+    0
+  );
+  const totalPlannedThisMonth = activePlanned.reduce(
+    (sum, p) => sum + Math.max(0, Number(p.amount) || 0),
+    0
+  );
+
+  return {
+    byCategoryId,
+    effectiveAllocations,
+    totalAllocated,
+    totalRecurring,
+    totalPlannedThisMonth,
+    unmatchedRecurringTotal,
+    unmatchedPlannedTotal,
+    savingsAllocated,
+  };
 }

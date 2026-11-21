@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { X } from 'lucide-react';
 import { Category, PlannedPurchase, PlannedPurchaseStatus } from '../../types/budget';
-import { getSelectableMonths } from '../../utils/budgetUtils';
+import { formatMonthLabel, getSelectableMonths } from '../../utils/budgetUtils';
 
 interface PlannedFormModalProps {
   isOpen: boolean;
@@ -35,7 +35,27 @@ export const PlannedFormModal: React.FC<PlannedFormModalProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const monthOptions = getSelectableMonths(currentMonth, 12);
+  // Always include editingItem.target_month even if outside the 12-month window
+  const monthOptions = useMemo(() => {
+    const base = getSelectableMonths(currentMonth, 12);
+    if (editingItem?.target_month && !base.some((m) => m.value === editingItem.target_month)) {
+      const merged = [
+        ...base,
+        {
+          value: editingItem.target_month,
+          label: formatMonthLabel(editingItem.target_month),
+        },
+      ];
+      return merged.sort((a, b) => a.value.localeCompare(b.value));
+    }
+    return base;
+  }, [currentMonth, editingItem]);
+
+  const hasLegacyCategory = useMemo(() => {
+    if (!editingItem?.category) return false;
+    const norm = editingItem.category.trim().toLowerCase();
+    return !categories.some((c) => c.name.trim().toLowerCase() === norm);
+  }, [editingItem, categories]);
 
   useEffect(() => {
     if (editingItem) {
@@ -90,7 +110,12 @@ export const PlannedFormModal: React.FC<PlannedFormModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200">
+    <div
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !submitting) onClose();
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200"
+    >
       <div className="w-full max-w-md bg-white dark:bg-[#1e293b] rounded-2xl shadow-2xl border border-[#e5e7eb] dark:border-[#334155] overflow-hidden max-h-[90vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#e5e7eb] dark:border-[#334155] shrink-0">
@@ -179,12 +204,17 @@ export const PlannedFormModal: React.FC<PlannedFormModalProps> = ({
               onChange={(e) => setCategory(e.target.value)}
               className="w-full px-3 py-2 text-sm rounded-xl bg-gray-50 dark:bg-slate-900 border border-[#e5e7eb] dark:border-[#334155] text-[#111827] dark:text-[#f1f5f9] focus:outline-hidden focus:ring-2 focus:ring-[#6366f1]"
             >
+              {hasLegacyCategory && editingItem && (
+                <option value={editingItem.category}>{editingItem.category}</option>
+              )}
               {categories.map((c) => (
                 <option key={c.id} value={c.name}>
                   {c.name}
                 </option>
               ))}
-              {categories.length === 0 && <option value="General">General</option>}
+              {categories.length === 0 && !hasLegacyCategory && (
+                <option value="General">General</option>
+              )}
             </select>
           </div>
 

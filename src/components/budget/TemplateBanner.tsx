@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Sparkles, ArrowRight, Bookmark, DollarSign } from 'lucide-react';
+import { X, Sparkles, ArrowRight, Bookmark, IndianRupee } from 'lucide-react';
 import { BudgetTemplate } from '../../types/budget';
 import { formatMonthLabel } from '../../utils/budgetUtils';
 
@@ -99,7 +99,7 @@ export const TemplateBanner: React.FC<TemplateBannerProps> = ({
                     onClick={onSetIncome}
                     className="px-3 py-1.5 rounded-lg bg-[#6366f1] text-white text-xs font-bold hover:bg-indigo-600 transition-colors flex items-center gap-1 cursor-pointer shadow-2xs"
                   >
-                    <DollarSign className="w-3 h-3" />
+                    <IndianRupee className="w-3 h-3" />
                     Set Income
                   </button>
                   <button

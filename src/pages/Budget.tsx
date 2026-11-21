@@ -8,11 +8,10 @@ import {
   Layers,
   ChevronDown,
   ChevronUp,
-  CheckCircle2,
-  AlertTriangle,
   RotateCcw,
   LayoutTemplate,
   Bookmark,
+  Trash2,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import {
@@ -21,6 +20,7 @@ import {
   BudgetTemplate,
   RecurringExpense,
   PlannedPurchase,
+  PlannedPurchaseStatus,
   BudgetPlannerTab,
 } from '../types/budget';
 import { budgetService } from '../services/budgetService';
@@ -29,6 +29,7 @@ import {
   formatIndianCurrency,
   formatMonthLabel,
   getUpcomingMonths,
+  computeBudgetPlanBreakdown,
 } from '../utils/budgetUtils';
 import { MonthSelector } from '../components/budget/MonthSelector';
 import { BudgetHero } from '../components/budget/BudgetHero';
@@ -54,6 +55,13 @@ export const BudgetPage: React.FC = () => {
     monthParam && /^\d{4}-\d{2}$/.test(monthParam) ? monthParam : getCurrentMonthString()
   );
 
+  // Keep selectedMonth in sync with browser Back / Forward URL changes
+  useEffect(() => {
+    if (monthParam && /^\d{4}-\d{2}$/.test(monthParam) && monthParam !== selectedMonth) {
+      setSelectedMonth(monthParam);
+    }
+  }, [monthParam, selectedMonth]);
+
   const handleMonthChange = (newMonth: string) => {
     setSelectedMonth(newMonth);
     setSearchParams({ month: newMonth });
@@ -73,9 +81,17 @@ export const BudgetPage: React.FC = () => {
   const [allPlanned, setAllPlanned] = useState<PlannedPurchase[]>([]);
   const [templates, setTemplates] = useState<BudgetTemplate[]>([]);
 
+  // Refs to guarantee fresh values on rapid edits / saves
+  const budgetRef = useRef<MonthlyBudget>(budget);
+  useEffect(() => {
+    budgetRef.current = budget;
+  }, [budget]);
+
   // Modals & Sheets state
   const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+  const [categoryToDelete, setCategoryToDelete] = useState<Category | null>(null);
+  const [deletingCategory, setDeletingCategory] = useState(false);
 
   const [isRecurringModalOpen, setIsRecurringModalOpen] = useState(false);
   const [editingRecurring, setEditingRecurring] = useState<RecurringExpense | null>(null);
@@ -94,18 +110,27 @@ export const BudgetPage: React.FC = () => {
   // Collapsible upcoming months state
   const [collapsedMonths, setCollapsedMonths] = useState<Record<string, boolean>>({});
 
-  // Toast / Status state
+  // Toast / Status state with proper timer cleanup
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const [undoIncome, setUndoIncome] = useState<{ previous: number; timerId: NodeJS.Timeout } | null>(
-    null
-  );
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [undoIncome, setUndoIncome] = useState<{ previous: number } | null>(null);
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const showToast = (msg: string, duration = 2500) => {
+  const showToast = useCallback((msg: string, duration = 2500) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     setToastMessage(msg);
-    setTimeout(() => {
-      setToastMessage((curr) => (curr === msg ? null : curr));
+    toastTimerRef.current = setTimeout(() => {
+      setToastMessage(null);
+      toastTimerRef.current = null;
     }, duration);
-  };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    };
+  }, []);
 
   // Load data whenever userId or selectedMonth changes
   const loadData = useCallback(async () => {
@@ -121,6 +146,7 @@ export const BudgetPage: React.FC = () => {
 
       setCategories(cats);
       setBudget(monthlyBudget);
+      budgetRef.current = monthlyBudget;
       setRecurringExpenses(recurring);
       setAllPlanned(planned);
       setTemplates(tpls);
@@ -130,75 +156,100 @@ export const BudgetPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [userId, selectedMonth]);
+  }, [userId, selectedMonth, showToast]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
 
-  // Debounced auto-save for allocations
-  const saveDebounceTimer = useRef<NodeJS.Timeout | null>(null);
-  const pendingAllocations = useRef<Record<string, number>>(budget.allocations);
+  // Planned purchases partition
+  const thisMonthPlanned = useMemo(() => {
+    return allPlanned.filter((p) => p.target_month === selectedMonth);
+  }, [allPlanned, selectedMonth]);
 
-  useEffect(() => {
-    pendingAllocations.current = budget.allocations;
-  }, [budget.allocations]);
+  // Unified budget plan breakdown (manual allocations + active recurring bills + this month's planned purchases)
+  const planBreakdown = useMemo(() => {
+    return computeBudgetPlanBreakdown(
+      categories,
+      budget.allocations,
+      recurringExpenses,
+      thisMonthPlanned
+    );
+  }, [categories, budget.allocations, recurringExpenses, thisMonthPlanned]);
 
-  const handleUpdateAllocation = (categoryId: string, amount: number) => {
-    const updated = {
-      ...budget.allocations,
-      [categoryId]: amount,
+  const totalAllocated = planBreakdown.totalAllocated;
+  const activeRecurringTotal = planBreakdown.totalRecurring;
+  const unmatchedTotal =
+    planBreakdown.unmatchedRecurringTotal + planBreakdown.unmatchedPlannedTotal;
+
+  // Immediate allocation save (no stale debounce closure or refresh data loss)
+  const handleUpdateAllocation = async (categoryId: string, amount: number) => {
+    const currentBudget = budgetRef.current;
+    const catBreakdown = planBreakdown.byCategoryId[categoryId];
+    const committed = catBreakdown?.committedTotal || 0;
+
+    // If user enters an amount below active bills/planned commitments for this category,
+    // reset manual override to 0 so effective total equals the commitments without double counting.
+    const manualValue = committed > 0 && amount < committed ? 0 : amount;
+    const updatedAllocations = {
+      ...currentBudget.allocations,
+      [categoryId]: manualValue,
     };
-    pendingAllocations.current = updated;
 
-    setBudget((prev) => ({
-      ...prev,
-      allocations: updated,
-    }));
+    const nextBudget: MonthlyBudget = {
+      ...currentBudget,
+      allocations: updatedAllocations,
+    };
+    budgetRef.current = nextBudget;
+    setBudget(nextBudget);
 
-    if (saveDebounceTimer.current) {
-      clearTimeout(saveDebounceTimer.current);
-    }
-
-    saveDebounceTimer.current = setTimeout(async () => {
-      try {
-        await budgetService.upsertMonthlyBudget(
-          userId,
-          selectedMonth,
-          budget.income,
-          pendingAllocations.current
-        );
+    try {
+      await budgetService.upsertMonthlyBudget(
+        userId,
+        selectedMonth,
+        nextBudget.income,
+        updatedAllocations
+      );
+      if (committed > 0 && amount < committed) {
+        showToast(`Includes ₹${formatIndianCurrency(committed)} from active bills/planned`, 3200);
+      } else {
         showToast('Saved');
-      } catch (err) {
-        console.error('Auto-save failed:', err);
       }
-    }, 800);
+    } catch (err) {
+      console.error('Allocation save failed:', err);
+      showToast('Failed to save allocation');
+    }
   };
 
   // Inline income update
   const handleUpdateIncome = async (newIncome: number) => {
-    const oldIncome = budget.income;
-    setBudget((prev) => ({ ...prev, income: newIncome }));
+    const currentBudget = budgetRef.current;
+    const oldIncome = currentBudget.income;
+    const nextBudget: MonthlyBudget = { ...currentBudget, income: newIncome };
+    budgetRef.current = nextBudget;
+    setBudget(nextBudget);
 
     try {
       await budgetService.upsertMonthlyBudget(
         userId,
         selectedMonth,
         newIncome,
-        pendingAllocations.current
+        nextBudget.allocations
       );
 
-      // 5-second undo toast
-      if (undoIncome?.timerId) clearTimeout(undoIncome.timerId);
-      const timerId = setTimeout(() => {
+      if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+      setUndoIncome({ previous: oldIncome });
+      undoTimerRef.current = setTimeout(() => {
         setUndoIncome(null);
+        undoTimerRef.current = null;
       }, 5000);
 
-      setUndoIncome({ previous: oldIncome, timerId });
-      showToast(`Income set to ₹${formatIndianCurrency(newIncome)}`);
+      showToast(`Income set to ₹${formatIndianCurrency(newIncome)}`, 5000);
     } catch (err) {
       console.error('Update income failed:', err);
-      setBudget((prev) => ({ ...prev, income: oldIncome }));
+      const reverted: MonthlyBudget = { ...budgetRef.current, income: oldIncome };
+      budgetRef.current = reverted;
+      setBudget(reverted);
       showToast('Failed to update income');
     }
   };
@@ -206,15 +257,21 @@ export const BudgetPage: React.FC = () => {
   const handleUndoIncome = async () => {
     if (!undoIncome) return;
     const prevVal = undoIncome.previous;
-    clearTimeout(undoIncome.timerId);
+    if (undoTimerRef.current) {
+      clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
+    }
     setUndoIncome(null);
 
-    setBudget((prev) => ({ ...prev, income: prevVal }));
+    const nextBudget: MonthlyBudget = { ...budgetRef.current, income: prevVal };
+    budgetRef.current = nextBudget;
+    setBudget(nextBudget);
+
     await budgetService.upsertMonthlyBudget(
       userId,
       selectedMonth,
       prevVal,
-      pendingAllocations.current
+      nextBudget.allocations
     );
     showToast(`Restored income to ₹${formatIndianCurrency(prevVal)}`);
   };
@@ -222,46 +279,70 @@ export const BudgetPage: React.FC = () => {
   // Category Actions
   const handleSaveCategory = async (catData: { name: string; icon: string; color: string }) => {
     if (editingCategory) {
+      const oldName = editingCategory.name;
       const updated = await budgetService.updateCategory(userId, editingCategory.id, catData);
       setCategories((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
+
+      // Reflect cascaded category rename immediately in Recurring & Planned state
+      if (oldName.trim().toLowerCase() !== updated.name.trim().toLowerCase()) {
+        const oldNorm = oldName.trim().toLowerCase();
+        setRecurringExpenses((prev) =>
+          prev.map((r) =>
+            r.category.trim().toLowerCase() === oldNorm ? { ...r, category: updated.name } : r
+          )
+        );
+        setAllPlanned((prev) =>
+          prev.map((p) =>
+            p.category.trim().toLowerCase() === oldNorm ? { ...p, category: updated.name } : p
+          )
+        );
+      }
       showToast('Category updated');
     } else {
       const created = await budgetService.addCategory(userId, catData);
       setCategories((prev) => [...prev, created]);
-      // Seed 0 allocation for this month
-      const updatedAllocations = { ...budget.allocations, [created.id]: 0 };
-      setBudget((prev) => ({ ...prev, allocations: updatedAllocations }));
+      const currentBudget = budgetRef.current;
+      const updatedAllocations = { ...currentBudget.allocations, [created.id]: 0 };
+      const nextBudget: MonthlyBudget = { ...currentBudget, allocations: updatedAllocations };
+      budgetRef.current = nextBudget;
+      setBudget(nextBudget);
       await budgetService.upsertMonthlyBudget(
         userId,
         selectedMonth,
-        budget.income,
+        nextBudget.income,
         updatedAllocations
       );
       showToast('Category created');
     }
   };
 
-  const handleDeleteCategory = async (category: Category) => {
-    if (
-      !window.confirm(
-        `Are you sure you want to delete "${category.name}"? Allocations for this category will be removed.`
-      )
-    ) {
-      return;
-    }
-    await budgetService.deleteCategory(userId, category.id);
-    setCategories((prev) => prev.filter((c) => c.id !== category.id));
+  const handleConfirmDeleteCategory = async () => {
+    if (!categoryToDelete) return;
+    setDeletingCategory(true);
+    try {
+      await budgetService.deleteCategory(userId, categoryToDelete.id);
+      setCategories((prev) => prev.filter((c) => c.id !== categoryToDelete.id));
 
-    const updatedAllocations = { ...budget.allocations };
-    delete updatedAllocations[category.id];
-    setBudget((prev) => ({ ...prev, allocations: updatedAllocations }));
-    await budgetService.upsertMonthlyBudget(
-      userId,
-      selectedMonth,
-      budget.income,
-      updatedAllocations
-    );
-    showToast('Category deleted');
+      const currentBudget = budgetRef.current;
+      const updatedAllocations = { ...currentBudget.allocations };
+      delete updatedAllocations[categoryToDelete.id];
+      const nextBudget: MonthlyBudget = { ...currentBudget, allocations: updatedAllocations };
+      budgetRef.current = nextBudget;
+      setBudget(nextBudget);
+      await budgetService.upsertMonthlyBudget(
+        userId,
+        selectedMonth,
+        nextBudget.income,
+        updatedAllocations
+      );
+      setCategoryToDelete(null);
+      showToast('Category deleted');
+    } catch (err) {
+      console.error('Delete category failed:', err);
+      showToast('Failed to delete category');
+    } finally {
+      setDeletingCategory(false);
+    }
   };
 
   // Recurring Actions
@@ -273,21 +354,33 @@ export const BudgetPage: React.FC = () => {
     active: boolean;
   }) => {
     if (editingRecurring) {
-      const updated = await budgetService.updateRecurring(userId, editingRecurring.id, data);
-      setRecurringExpenses((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+      const updated = await budgetService.updateRecurring(
+        userId,
+        editingRecurring.id,
+        data,
+        editingRecurring
+      );
+      setRecurringExpenses((prev) =>
+        prev
+          .map((r) => (r.id === updated.id ? updated : r))
+          .sort((a, b) => a.day_of_month - b.day_of_month)
+      );
       showToast('Recurring expense updated');
     } else {
       const created = await budgetService.addRecurring(userId, data);
-      setRecurringExpenses((prev) => [...prev, created]);
+      setRecurringExpenses((prev) =>
+        [...prev, created].sort((a, b) => a.day_of_month - b.day_of_month)
+      );
       showToast('Recurring expense added');
     }
   };
 
   const handleToggleRecurring = async (id: string, active: boolean) => {
+    const existing = recurringExpenses.find((r) => r.id === id);
     setRecurringExpenses((prev) =>
       prev.map((r) => (r.id === id ? { ...r, active } : r))
     );
-    await budgetService.toggleRecurring(userId, id, active);
+    await budgetService.toggleRecurring(userId, id, active, existing);
   };
 
   const handleDeleteRecurring = async (id: string) => {
@@ -297,9 +390,21 @@ export const BudgetPage: React.FC = () => {
   };
 
   // Planned Actions
-  const handleSavePlanned = async (data: any) => {
+  const handleSavePlanned = async (data: {
+    name: string;
+    amount: number;
+    category: string;
+    target_month: string;
+    status: PlannedPurchaseStatus;
+    notes?: string;
+  }) => {
     if (editingPlanned) {
-      const updated = await budgetService.updatePlanned(userId, editingPlanned.id, data);
+      const updated = await budgetService.updatePlanned(
+        userId,
+        editingPlanned.id,
+        data,
+        editingPlanned
+      );
       setAllPlanned((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
       showToast('Planned purchase updated');
     } else {
@@ -309,12 +414,13 @@ export const BudgetPage: React.FC = () => {
     }
   };
 
-  const handleMarkBought = async (id: string) => {
+  const handleTogglePlannedBought = async (id: string, nextStatus: PlannedPurchaseStatus) => {
+    const existing = allPlanned.find((p) => p.id === id);
     setAllPlanned((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, status: 'bought' } : p))
+      prev.map((p) => (p.id === id ? { ...p, status: nextStatus } : p))
     );
-    await budgetService.markPlannedBought(userId, id);
-    showToast('Marked as bought ✓');
+    await budgetService.markPlannedBought(userId, id, nextStatus, existing);
+    showToast(nextStatus === 'bought' ? 'Marked as bought ✓' : 'Marked back as planned');
   };
 
   const handleDeletePlanned = async (id: string) => {
@@ -366,7 +472,7 @@ export const BudgetPage: React.FC = () => {
         categories
       );
       setBudget(result.budget);
-      pendingAllocations.current = result.budget.allocations;
+      budgetRef.current = result.budget;
       if (result.skippedCount > 0) {
         showToast(
           `Applied "${template.name}". Note: ${result.skippedCount} missing category skipped.`
@@ -394,11 +500,7 @@ export const BudgetPage: React.FC = () => {
   };
 
   const handleOpenSaveCurrentPlan = () => {
-    const currentTotal = Object.values(budget.allocations || {}).reduce(
-      (sum, val) => sum + (Number(val) || 0),
-      0
-    );
-    if (currentTotal <= 0) {
+    if (totalAllocated <= 0) {
       showToast('Allocate to at least one category before saving as a template', 3000);
       return;
     }
@@ -416,35 +518,29 @@ export const BudgetPage: React.FC = () => {
     return templates.find((t) => t.is_default) || null;
   }, [templates]);
 
-  const isMonthUnbudgeted = useMemo(() => {
-    const total = Object.values(budget.allocations || {}).reduce(
+  // Show template banner if user has templates to apply to an unbudgeted month,
+  // or if both income and allocations are 0 (brand new month setup)
+  const shouldShowTemplateBanner = useMemo(() => {
+    const manualTotal = Object.values(budget.allocations || {}).reduce(
       (s, v) => s + (Number(v) || 0),
       0
     );
-    return total === 0;
-  }, [budget.allocations]);
+    if (manualTotal > 0) return false;
+    if (templates.length > 0) return true;
+    return budget.income === 0 && totalAllocated === 0;
+  }, [budget.allocations, budget.income, templates.length, totalAllocated]);
 
-  // Derived Calculations
-  const totalAllocated = useMemo(() => {
-    return categories.reduce((sum, cat) => {
-      return sum + (Number(budget.allocations[cat.id]) || 0);
-    }, 0);
-  }, [categories, budget.allocations]);
-
-  const activeRecurringTotal = useMemo(() => {
-    return recurringExpenses
-      .filter((r) => r.active)
-      .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
-  }, [recurringExpenses]);
-
-  // Planned purchases partition
-  const thisMonthPlanned = useMemo(() => {
-    return allPlanned.filter((p) => p.target_month === selectedMonth);
-  }, [allPlanned, selectedMonth]);
-
+  // Include next 3 months PLUS any other months that have planned items (e.g., 4-12 months out)
   const upcomingMonthsList = useMemo(() => {
-    return getUpcomingMonths(3, selectedMonth);
-  }, [selectedMonth]);
+    const base = getUpcomingMonths(3, selectedMonth);
+    const monthSet = new Set<string>(base);
+    allPlanned.forEach((p) => {
+      if (p.target_month && p.target_month !== selectedMonth) {
+        monthSet.add(p.target_month);
+      }
+    });
+    return Array.from(monthSet).sort((a, b) => a.localeCompare(b));
+  }, [selectedMonth, allPlanned]);
 
   const upcomingPlannedByMonth = useMemo(() => {
     const grouped: Record<string, PlannedPurchase[]> = {};
@@ -458,13 +554,13 @@ export const BudgetPage: React.FC = () => {
     <div className="w-full max-w-[480px] mx-auto min-h-full px-4 pt-3 pb-8 text-[#111827] dark:text-[#f1f5f9] transition-colors duration-200 overflow-x-hidden space-y-4">
       {/* Toast Notification */}
       {toastMessage && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900/90 text-white dark:bg-white/95 dark:text-slate-950 text-xs font-semibold shadow-lg backdrop-blur-md animate-in fade-in slide-in-from-top-2 duration-150">
-          <span>{toastMessage}</span>
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900/90 text-white dark:bg-white/95 dark:text-slate-950 text-xs font-semibold shadow-lg backdrop-blur-md animate-in fade-in slide-in-from-top-2 duration-150 max-w-[90vw]">
+          <span className="truncate">{toastMessage}</span>
           {undoIncome && (
             <button
               type="button"
               onClick={handleUndoIncome}
-              className="flex items-center gap-1 text-indigo-400 dark:text-indigo-600 font-bold ml-1 pl-1.5 border-l border-white/20 dark:border-black/20 hover:underline cursor-pointer"
+              className="flex items-center gap-1 text-indigo-400 dark:text-indigo-600 font-bold ml-1 pl-1.5 border-l border-white/20 dark:border-black/20 hover:underline cursor-pointer shrink-0"
             >
               <RotateCcw className="w-3 h-3" />
               Undo
@@ -520,7 +616,7 @@ export const BudgetPage: React.FC = () => {
       </div>
 
       {/* Inline Banner for New/Unbudgeted Months */}
-      {isMonthUnbudgeted && !dismissedBanners[selectedMonth] && (
+      {shouldShowTemplateBanner && !dismissedBanners[selectedMonth] && (
         <div>
           <TemplateBanner
             month={selectedMonth}
@@ -630,15 +726,28 @@ export const BudgetPage: React.FC = () => {
                     key={category.id}
                     category={category}
                     allocationAmount={budget.allocations[category.id] || 0}
+                    breakdown={planBreakdown.byCategoryId[category.id]}
                     totalIncome={budget.income}
                     onUpdateAllocation={handleUpdateAllocation}
                     onEditCategory={(cat) => {
                       setEditingCategory(cat);
                       setIsCategoryModalOpen(true);
                     }}
-                    onDeleteCategory={handleDeleteCategory}
+                    onDeleteCategory={(cat) => setCategoryToDelete(cat)}
                   />
                 ))}
+
+                {/* Uncategorized Active Commitments notice (if any bill/planned item uses a deleted/other category) */}
+                {unmatchedTotal > 0 && (
+                  <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-800/50 text-xs">
+                    <span className="text-amber-800 dark:text-amber-300 font-medium">
+                      Other uncategorized bills / planned items
+                    </span>
+                    <span className="font-bold text-amber-900 dark:text-amber-200 shrink-0">
+                      ₹{formatIndianCurrency(unmatchedTotal)}
+                    </span>
+                  </div>
+                )}
 
                 {/* Plan Summary Bottom Card */}
                 <div className="mt-4 p-4 rounded-xl bg-gray-50 dark:bg-slate-900 border border-[#e5e7eb] dark:border-[#334155] space-y-2">
@@ -668,7 +777,7 @@ export const BudgetPage: React.FC = () => {
                       className={`h-full rounded-full transition-all duration-300 ${
                         totalAllocated > budget.income
                           ? 'bg-rose-500'
-                          : totalAllocated === budget.income
+                          : totalAllocated === budget.income && budget.income > 0
                           ? 'bg-emerald-500'
                           : 'bg-[#6366f1]'
                       }`}
@@ -711,7 +820,7 @@ export const BudgetPage: React.FC = () => {
             <div className="flex items-start gap-2.5 p-3 rounded-xl bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-900/60">
               <Info className="w-4 h-4 text-[#6366f1] dark:text-[#818cf8] shrink-0 mt-0.5" />
               <p className="text-xs text-indigo-900 dark:text-indigo-200 leading-relaxed">
-                Monthly bills you pay — for planning reference only. Keep track of fixed commitments without manual transaction logging.
+                Active monthly bills automatically count toward their category in the Plan tab, so your budget stays accurate without double counting.
               </p>
             </div>
 
@@ -816,7 +925,7 @@ export const BudgetPage: React.FC = () => {
                       key={item.id}
                       item={item}
                       categoryLabel={item.category}
-                      onMarkBought={handleMarkBought}
+                      onToggleBought={handleTogglePlannedBought}
                       onEdit={(p) => {
                         setEditingPlanned(p);
                         setIsPlannedModalOpen(true);
@@ -828,10 +937,10 @@ export const BudgetPage: React.FC = () => {
               )}
             </div>
 
-            {/* Section 2: Upcoming (Next 3 months grouped & collapsible) */}
+            {/* Section 2: Upcoming & Other Scheduled Months (grouped & collapsible) */}
             <div className="pt-2 space-y-2">
               <span className="text-xs font-bold text-[#111827] dark:text-[#f1f5f9] block">
-                Upcoming Months
+                Other Scheduled Months
               </span>
 
               {upcomingMonthsList.map((futureMonth) => {
@@ -884,7 +993,7 @@ export const BudgetPage: React.FC = () => {
                               key={item.id}
                               item={item}
                               categoryLabel={item.category}
-                              onMarkBought={handleMarkBought}
+                              onToggleBought={handleTogglePlannedBought}
                               onEdit={(p) => {
                                 setEditingPlanned(p);
                                 setIsPlannedModalOpen(true);
@@ -902,6 +1011,50 @@ export const BudgetPage: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Delete Category Confirmation Modal (replaces blocked window.confirm) */}
+      {categoryToDelete && (
+        <div
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !deletingCategory) setCategoryToDelete(null);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150"
+        >
+          <div className="w-full max-w-sm bg-white dark:bg-[#1e293b] rounded-2xl shadow-2xl border border-[#e5e7eb] dark:border-[#334155] p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-xl bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 flex items-center justify-center shrink-0">
+                <Trash2 className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-[#111827] dark:text-[#f1f5f9]">
+                  Delete "{categoryToDelete.name}"?
+                </h3>
+                <p className="text-xs text-[#6b7280] dark:text-[#94a3b8] mt-1 leading-relaxed">
+                  Manual allocations for this category will be removed. Any active recurring bills will remain in your Recurring tab.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#e5e7eb] dark:border-[#334155]">
+              <button
+                type="button"
+                disabled={deletingCategory}
+                onClick={() => setCategoryToDelete(null)}
+                className="px-3.5 py-2 text-xs font-semibold text-[#6b7280] dark:text-[#94a3b8] hover:bg-gray-100 dark:hover:bg-slate-800 rounded-xl transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deletingCategory}
+                onClick={handleConfirmDeleteCategory}
+                className="px-3.5 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-xl shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {deletingCategory ? 'Deleting...' : 'Delete Category'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modals */}
       <CategoryFormModal
@@ -969,7 +1122,9 @@ export const BudgetPage: React.FC = () => {
         }}
         categories={categories}
         initialName={editingTemplate ? editingTemplate.name : ''}
-        initialAllocations={editingTemplate ? editingTemplate.allocations : budget.allocations}
+        initialAllocations={
+          editingTemplate ? editingTemplate.allocations : planBreakdown.effectiveAllocations
+        }
         initialIsDefault={editingTemplate ? editingTemplate.is_default : false}
         isEditing={!!editingTemplate}
         templateId={editingTemplate ? editingTemplate.id : undefined}
